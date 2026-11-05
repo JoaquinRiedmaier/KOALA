@@ -105,100 +105,6 @@ install_binary() {
     fi
 }
 
-# Configurar inicio automático
-setup_automatic_start() {
-    print_section "Configuración de inicio automático"
-    
-    echo_color "info" "Intentando configurar inicio automático..."
-    
-    # Función para configurar systemd para usuarios
-    setup_systemd_user() {
-        echo_color "debug" "Intentando configurar systemd --user..."
-        
-        local service_file="$HOME/.config/systemd/user/koala.service"
-        local service_content="[Unit]
-Description=KOALA Internet Monitor
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$CARGO_BIN barra
-Restart=always
-RestartSec=30
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=default.target
-"
-        
-        mkdir -p "$HOME/.config/systemd/user"
-        echo -e "$service_content" > "$service_file"
-        
-        if systemctl --user daemon-reload 2>/dev/null; then
-            systemctl --user enable koala.service
-            systemctl --user start koala.service
-            echo_color "success" "Servicio systemd configurado y iniciado"
-            
-            # Verificar estado
-            if systemctl --user is-active koala.service 2>/dev/null | grep -q "active"; then
-                echo_color "success" "Servicio KOALA está corriendo"
-            else
-                echo_color "warning" "Servicio KOALA no está activo"
-            fi
-            return 0
-        else
-            echo_color "warning" "No se pudo configurar systemd --user (¿No hay sesión de usuario?)"
-            return 1
-        fi
-    }
-    
-    # Función para configurar autostart para entornos de escritorio
-    setup_desktop_autostart() {
-        echo_color "debug" "Configurando autostart de escritorio..."
-        
-        local desktop_file="$HOME/.config/autostart/koala.desktop"
-        local desktop_content="[Desktop Entry]
-Type=Application
-Exec=$CARGO_BIN barra
-Hidden=false
-NoDisplay=false
-Name=KOALA Internet Monitor
-Comment=Monitor de conectividad de internet usando múltiples proveedores
-Categories=Network;
-Terminal=true
-StartupNotify=true
-"
-        
-        mkdir -p "$HOME/.config/autostart"
-        echo -e "$desktop_content" > "$desktop_file"
-        
-        if [ -f "$desktop_file" ]; then
-            echo_color "success" "Autostart de escritorio configurado en $desktop_file"
-            return 0
-        else
-            echo_color "error" "Fallo creando archivo de autostart"
-            return 1
-        fi
-    }
-    
-    # Intentar configurar systemd primero
-    if command -v systemctl &> /dev/null; then
-        if setup_systemd_user; then
-            echo_color "success" "Método de inicio automático preferido (systemd) usado"
-            return 0
-        else
-            echo_color "info" "systemd --user no disponible, intentando autostart de escritorio..."
-            setup_desktop_autostart
-            return $?
-        fi
-    else
-        echo_color "warning" "systemctl no disponible, usando autostart de escritorio..."
-        setup_desktop_autostart
-        return $?
-    fi
-}
-
 # Ejecutar koala instalar para configurar waybar
 install_to_waybar() {
     print_section "Integración con Waybar"
@@ -293,7 +199,7 @@ main() {
                 echo "  --debug   Ejecutar en modo debug (más detalles)"
                 echo "  --help    Mostrar esta ayuda"
                 echo ""
-                echo "Este script instalará KOALA y lo configurará para inicio automático"
+                echo "Este script instalará KOALA y lo integrará con waybar"
                 exit 0
                 ;;
             *)
@@ -311,7 +217,6 @@ main() {
     # Ejecutar flujo de instalación
     check_prerequisites
     install_binary
-    setup_automatic_start
     install_to_waybar
     run_post_install_tests
     
@@ -321,7 +226,6 @@ main() {
     echo ""
     echo "=== Resumen del estado ==="
     echo "✓ Binario instalado: $CARGO_BIN"
-    echo "✓ Inicio automático configurado"
     echo "✓ Integración con waybar completada"
     echo "✓ Tests post-instalación ejecutados"
     echo ""

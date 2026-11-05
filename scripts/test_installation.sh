@@ -124,19 +124,6 @@ run_functionality_tests() {
         echo_color "error" "Comando 'koala medir' falló con código $exit_code"
         echo "Ver logs: cat /tmp/koala_measure.log"
     fi
-    
-    # 3. Verificar automatización (si está configurado)
-    echo "Verificando configuración de automatización..."
-    if [ -f "$HOME/.config/systemd/user/koala.service" ] || [ -f "$HOME/.config/autostart/koala.desktop" ]; then
-        echo_color "success" "Archivos de automatización encontrados"
-        
-        # Intentar verificar servicio systemd
-        if command -v systemctl &> /dev/null && systemctl --user is-enabled koala.service 2>/dev/null | grep -q "enabled"; then
-            echo_color "success" "Servicio systemd habilitado"
-        fi
-    else
-        echo_color "warning" "Archivos de automatización no encontrados"
-    fi
 }
 
 # Función para verificar integración con waybar

@@ -43,7 +43,6 @@ chmod +x scripts/install.sh
 
 Este script hará:
 - Instalar KOALA usando cargo
-- Configurar inicio automático (systemd o autostart)
 - Integrar con waybar usando `koala instalar`
 - Reiniciar waybar si está corriendo
 
@@ -224,17 +223,18 @@ cat ~/.config/waybar/config.jsonc | grep -o '"custom/koala"' | wc -l
 killall waybar && waybar
 ```
 
-### Problema 2: KOALA no se ejecuta automáticamente
+### Problema 2: El widget no aparece en waybar
+
+KOALA no necesita un servicio propio: waybar ejecuta `koala barra` cada 5 segundos. Si el widget
+desaparece (HyDE regenera `config.jsonc`), hay que volver a colocarlo:
 
 **Solución**:
 ```bash
-# Verificar estado del servicio
-systemctl --user status koala.service
-# Iniciar si no está corriendo
-systemctl --user start koala.service
-# Habilitar inicio automático
-systemctl --user enable koala.service
+koala instalar
 ```
+
+`koala instalar` se puede ejecutar en cada inicio de sesión: si no hay nada que cambiar, no escribe
+ningún archivo ni recarga waybar.
 
 ### Problema 3: Errores en la instalación
 
