@@ -15,6 +15,11 @@ pub struct Objetivo {
     pub nombre: String,
     pub ip4: Vec<String>,
     pub ip6: Vec<String>,
+    /// Dominios (p. ej. "www.facebook.com") que se pinguean sin forzar familia:
+    /// el sistema resuelve el nombre y elige la ruta disponible.
+    /// Opcional: los ips.json viejos sin este campo siguen parseando.
+    #[serde(default)]
+    pub dominios: Vec<String>,
 }
 
 /// ips.json embebido: el binario funciona aunque el usuario no tenga configuración propia.

@@ -50,4 +50,18 @@
     "nombre": "QUAD9",
     "ip4": ["9.9.9.9", "149.112.112.112"],
     "ip6": ["2620:fe::9", "2620:fe::fe"]
+},
+
+{
+    "nombre": "FACEBOOK",
+    "ip4": [],
+    "ip6": [],
+    "dominios": ["www.facebook.com"]
+},
+
+{
+    "nombre": "INSTAGRAM",
+    "ip4": [],
+    "ip6": [],
+    "dominios": ["www.instagram.com"]
 }]

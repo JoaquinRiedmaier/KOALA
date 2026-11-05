@@ -68,7 +68,7 @@ fn mediana(v: &[f32]) -> Option<f32> {
 
 /// Mide todos los objetivos y calcula el veredicto global.
 pub fn evaluar(objetivos: &[Objetivo]) -> EstadoGlobal {
-    // Armar la lista plana de (índice, ip, familia) y los rangos de cada proveedor.
+    // Armar la lista plana de (índice, destino, familia) y los rangos de cada proveedor.
     let mut lista: Vec<(usize, String, u8)> = Vec::new();
     let mut rangos: Vec<(String, usize, usize)> = Vec::new();
     for o in objetivos {
@@ -78,6 +78,10 @@ pub fn evaluar(objetivos: &[Objetivo]) -> EstadoGlobal {
         }
         for ip in &o.ip6 {
             lista.push((lista.len(), ip.clone(), 6));
+        }
+        // dominios: familia 0 = auto, el sistema resuelve el nombre al pinguear
+        for dominio in &o.dominios {
+            lista.push((lista.len(), dominio.clone(), 0));
         }
         let fin = lista.len();
         rangos.push((o.nombre.clone(), inicio, fin));

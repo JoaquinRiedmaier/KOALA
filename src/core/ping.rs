@@ -19,36 +19,37 @@ pub struct Metricas {
     pub packet_loss: u8,
 }
 
-/// Resultado del ping a una IP individual.
+/// Resultado del ping a un destino individual (IP o dominio).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResultadoPing {
     pub ip: String,
-    pub familia: u8, // 4 o 6
+    pub familia: u8, // 4, 6 o 0 (auto, dominios)
     pub metricas: Option<Metricas>,
     pub indice: usize, // posición original en la lista (para reordenar)
 }
 
 /// Ejecuta un ping y extrae métricas. `None` si el comando no se pudo correr.
-fn ejecutar_ping(ip: &str, familia: u8) -> Option<Metricas> {
+/// `familia`: 4 = forzar IPv4, 6 = forzar IPv6, 0 = auto (dominios).
+fn ejecutar_ping(destino: &str, familia: u8) -> Option<Metricas> {
     use crate::core::config::PINGS_POR_IP;
-    let fuerza = if familia == 6 { "-6" } else { "-4" };
-    let paquetes = PINGS_POR_IP.to_string();
-    let output = Command::new("ping")
-        .args([
-            "-c",
-            &paquetes, // coincide con los umbrales de verdict.rs
-            "-i",
-            "0.3", // intervalo rápido entre paquetes
-            "-W",
-            "1", // timeout por respuesta (sin -w: con deadline iputils envía 1 paquete extra)
-            fuerza,
-            ip,
-        ])
-        .output()
-        .ok()?;
+    let mut args: Vec<String> = vec![
+        "-c".into(),
+        PINGS_POR_IP.to_string(), // coincide con los umbrales de verdict.rs
+        "-i".into(),
+        "0.3".into(), // intervalo rápido entre paquetes
+        "-W".into(),
+        "1".into(), // timeout por respuesta (sin -w: con deadline iputils envía 1 paquete extra)
+    ];
+    match familia {
+        4 => args.push("-4".into()),
+        6 => args.push("-6".into()),
+        _ => {} // 0 = auto: sin flag, el sistema resuelve (dominios)
+    }
+    args.push(destino.to_string());
+    let output = Command::new("ping").args(&args).output().ok()?;
     let texto = String::from_utf8_lossy(&output.stdout);
     if std::env::var("KOALA_DEBUG").is_ok() {
-        eprintln!("── ping {ip} ──\n{texto}");
+        eprintln!("── ping {destino} ──\n{texto}");
     }
     extraer_metricas(&texto)
 }
@@ -121,8 +122,8 @@ pub fn extraer_metricas(texto_salida: &str) -> Option<Metricas> {
     })
 }
 
-/// Mide en paralelo todas las IPs de la lista `(orden, ip, familia)`.
-/// Los resultados vuelven ordenados por su `indice` original.
+/// Mide en paralelo todos los destinos `(orden, destino, familia)` de la lista
+/// (IPs o dominios). Los resultados vuelven ordenados por su `indice` original.
 pub fn medir_lote(lista: Vec<(usize, String, u8)>) -> Vec<ResultadoPing> {
     let (tx, rx) = mpsc::channel::<ResultadoPing>();
     std::thread::scope(|s| {
@@ -173,6 +174,26 @@ mod tests {
         \n\
         --- 4.2.2.2 ping statistics ---\n\
         4 packets transmitted, 0 received, 100% packet loss, time 1906ms";
+
+    // Salida típica del ping a un dominio: el header muestra el nombre resuelto
+    // entre paréntesis; el resto es idéntico al de una IP (mismo parser).
+    const SALIDA_DOMINIO: &str = "PING www.facebook.com (163.70.8.8) 56(84) bytes of data.\n\
+        64 bytes from www.facebook.com (163.70.8.8): icmp_seq=1 ttl=114 time=31.2 ms\n\
+        64 bytes from www.facebook.com (163.70.8.8): icmp_seq=2 ttl=114 time=30.4 ms\n\
+        64 bytes from www.facebook.com (163.70.8.8): icmp_seq=3 ttl=114 time=30.9 ms\n\
+        64 bytes from www.facebook.com (163.70.8.8): icmp_seq=4 ttl=114 time=30.6 ms\n\
+        \n\
+        --- www.facebook.com ping statistics ---\n\
+        4 packets transmitted, 4 received, 0% packet loss, time 3004ms\n\
+        rtt min/avg/max/mdev = 30.404/30.778/31.240/0.318 ms";
+
+    #[test]
+    fn parsea_dominio() {
+        let m = extraer_metricas(SALIDA_DOMINIO).expect("debería parsear");
+        assert_eq!(m.packet_loss, 0);
+        assert!((m.avg.unwrap() - 30.778).abs() < 0.01);
+        assert!((m.mdev.unwrap() - 0.318).abs() < 0.01);
+    }
 
     #[test]
     fn parsea_ingles() {

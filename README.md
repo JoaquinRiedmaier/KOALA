@@ -7,6 +7,7 @@ KOALA es una aplicación de terminal que analiza la conectividad de internet eje
 ## Características
 
 - **Medición de ping** a múltiples proveedores (Google, Cloudflare, Verizon, etc.)
+- **Ping a dominios** (www.facebook.com, www.instagram.com, ...): valida el DNS y la ruta real, integrado en el widget y en la GUI
 - **Widget para waybar** con indicadores visuales de estado
 - **Interfaz gráfica** para monitoreo en tiempo real
 - **Integración con HyDE** (Hyprland Desktop Environment)
@@ -84,6 +85,26 @@ KOALA soporta los siguientes subcomandos:
 
 Contiene las listas de IPs de proveedores a probar. Se crea automáticamente con un valor predeterminado si no existe.
 
+### Ping a dominios (campo `dominios` en ips.json)
+
+Además de IPs directas, cada objetivo puede incluir dominios, que se miden igual que cualquier servidor:
+
+```json
+{
+    "nombre": "FACEBOOK",
+    "ip4": [],
+    "ip6": [],
+    "dominios": ["www.facebook.com"]
+}
+```
+
+- No se fuerza familia de IP (tag `-4`/`-6`): el sistema resuelve el nombre y elige la ruta disponible. En una red sin IPv6 usa la v4; de paso valida el DNS real.
+- Los dominios cuentan para el estado global (OK/LENTO/INESTABLE) igual que las IPs, con los mismos umbrales y medianas.
+- Si el dominio no resuelve (DNS caído), su fila queda como **SIN RESPUESTA**.
+- El `ips.json` embebido en el binario ya trae **FACEBOOK** (www.facebook.com) e **INSTAGRAM** (www.instagram.com) como ejemplo.
+
+**Nota:** si ya tenés `~/.config/koala/ips.json`, `koala instalar` no lo toca (respeta tu configuración). Para tener los dominios: copiá el bloque de ejemplo a tu archivo, o borrá el archivo y ejecutá `koala instalar` para regenerarlo con el nuevo default.
+
 ### Configuración de Waybar (`~/.config/waybar/modules/koala.jsonc`)
 
 Definición del módulo personalizado para waybar:
@@ -115,6 +136,72 @@ Contiene los estilos CSS para el widget KOALA con indicadores de color:
 ### Configuración de Waybar (`~/.config/waybar/config.jsonc`)
 
 Añade `custom/koala` a la barra. KOALA se añade al lado izquierdo junto a otros widgets.
+
+## Lógica del estado y del tiempo mostrado
+
+Esta sección explica exactamente cómo se produce el texto del widget (`OK 13ms`, `LENTO 45ms`, `INESTABLE 60%`, `SIN RED`) y qué significa cada dato.
+
+### Qué mide cada ping
+
+Cada destino (IP o dominio) recibe 4 paquetes ICMP (`PINGS_POR_IP = 4`, intervalo de 0,3 s, timeout de 1 s por respuesta). Del resumen del comando `ping` se extraen, sin depender del idioma de la salida (se apoya en los números, no en las palabras):
+
+- **avg** → latencia promedio de esos 4 paquetes. De la línea `rtt min/avg/max/mdev = 12.910/13.259/13.568/0.251 ms` se toma el `13.259`.
+- **mdev** → variación de la latencia (jitter) entre esos 4 paquetes.
+- **% de pérdida** → del resumen tipo `4 packets transmitted, 4 received, 0% packet loss`.
+- Si ningún paquete volvió (100 % de pérdida), ese destino no aporta latencia.
+
+### Estado de cada servidor (filas de la GUI y del tooltip)
+
+| etiqueta | condición (se evalúa en este orden) |
+|---|---|
+| **SIN RESPUESTA** | ninguna de sus direcciones respondió |
+| **INESTABLE** | su peor pérdida > 25 % |
+| **LENTO** | su media > 50 ms, o su jitter > 10 ms |
+| **OK** | dentro de todos los umbrales |
+
+### Estado global (lo que muestra el widget)
+
+Se evalúa de peor a mejor:
+
+| estado | clase css | condición |
+|---|---|---|
+| **SIN RED** | `offline` | ningún servidor respondió |
+| **INESTABLE** | `bad` | la peor pérdida global > 25 %, **o** 2 o más servidores con 100 % de pérdida |
+| **LENTO** | `slow` | latencia global > 50 ms, **o** el jitter de cualquier servidor > 10 ms |
+| **OK** | `ok` | todo dentro de los umbrales |
+
+Las constantes están definidas en `src/core/verdict.rs`:
+
+| constante | valor |
+|---|---|
+| `LIMITE_MS` | 50 ms |
+| `LIMITE_JITTER` | 10 ms |
+| `LIMITE_PERDIDA` | 25 % |
+| `PROVEEDORES_CAIDOS_PARA_BAD` | 2 servidores caídos |
+
+### ¿Qué tiempo muestra el widget y de qué servidor es?
+
+El número de `OK 13ms` es la **latencia global**. No corresponde a un solo servidor fijo: es el valor típico entre todos los servidores que respondieron. Se calcula así:
+
+1. Cada dirección que respondió aporta su **avg** (promedio de sus 4 pings).
+2. Por servidor se reduce todo a una **mediana** de esos avg (la "media" del servidor).
+3. El widget toma la **mediana de las medias** de los servidores alcanzables → ese número es el que se muestra.
+
+Se usa **mediana** y no promedio a propósito: una IP muy lenta dentro de un proveedor, o un servidor muy lento dentro del total, no distorsionan el número representativo. Por ejemplo, con la métrica de arriba si 8 servidores rondan 30–40 ms y ULTRADNS VIRGINIA mide 130 ms, el widget sigue mostrando ~38 ms, aunque el tooltip/GUI marquen ese servidor como LENTO con su propio valor.
+
+El detalle "a qué servidor corresponde cada latencia" está siempre visible en el **tooltip del widget** (una fila por servidor, con su media en ms) y en la columna **PING** de la GUI.
+
+Casos especiales del número mostrado:
+- En `INESTABLE` lo que se muestra es la **peor % de pérdida** (la latencia deja de ser confiable).
+- En `SIN RED` no hay número.
+
+### De dónde sale el dato que muestra el widget
+
+El widget no mide en el hilo de la barra: pinta siempre la **última medición** guardada en la caché `~/.cache/koala/state.json`.
+
+- **Clic izquierdo** sobre el widget → mide ahora mismo y refresca.
+- Refresco automático: **apagado por defecto** (`core::config::AUTO_REFRESH = false`). Para activarlo sin recompilar: `KOALA_AUTO_REFRESH=1`; con esto re-mide cuando la caché supera los 300 s (`REFRESH_SECS`).
+- Con más de 600 s sin medir (`STALE_SECS`) el widget entra en modo **stale**: texto atenuado y cursiva (clase css `stale`), con una nota en el tooltip invitando a re-medir.
 
 ## Solución de Problemas
 

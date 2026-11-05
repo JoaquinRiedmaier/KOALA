@@ -1,297 +1,173 @@
-# Implementación Completa para KOALA
+# KOALA — Historial de Mediciones de Ping (Plan de Implementación)
 
-## Resumen de lo que se ha logrado
+> Este es el contenido final de `/home/johnd/Música/SOFTWARE/KOALA/IMPLEMENTATION_SUMMARY.md`:
+> el documento contendrá ÚNICAMENTE este plan de implementación (sin notas de pendientes ni
+> decisiones internas). Se escribirá al pasar al agente de build.
 
-Esta implementación resuelve el problema principal planteado por el usuario: **duplicación en waybar al ejecutar `koala instalar`** y proporciona **comandos de instalación completos** y **configuración de inicio automático**.
+---
 
-## Problemas Resueltos
+# KOALA — Historial de Mediciones de Ping
 
-### 1. Problema de Duplicación en Waybar
-**Síntoma**: Al ejecutar `koala instalar` múltiples veces, las entradas `"custom/koala"` se duplicaban en `~/.config/waybar/config.jsonc`.
+## 1) Objetivo
 
-**Causa Root**: La antigua función `colocar_en_config()` usaba una simple verificación de cadena:
-```rust
-if contenido.contains("\"custom/koala\"") {
-    return Ok(String::from("ya presente"));
-}
-```
-Esta podía falsear-positive si `"custom/koala"` aparecía en otro contexto del archivo.
+Al encender la computadora, KOALA debe comenzar a **registrar los valores de ping en un archivo persistente**. La interfaz gráfica (`koala gui`) mostrará un **historial** de esas mediciones, con **filtro por empresa** (proveedor: Google, Cloudflare, Facebook, Instagram, etc.).
 
-**Solución Implementada**:
-- **Detección precisa**: Nueva función `config_contiene_custom_koala()` que analiza el JSON y verifica la ubicación exacta del módulo
-- **Mejor depuración**: Detección de duplicación de marcadores en CSS
-- **Solución idempotente**: Los archivos ahora se reemplazan completamente en lugar de agregarse
+## 2) Alcance funcional
 
-### 2. Falta de Comandos de Instalación
-**Problema**: El usuario necesitaba comandos para instalar KOALA con "cargo" y configuración de inicio automático.
+| # | Requisito | Cómo se cumple |
+|---|-----------|----------------|
+| 1 | Al encender la PC se registra el primer valor | Unidad systemd `koala.service` (oneshot `koala medir`) habilitada en el arranque del usuario |
+| 2 | Los valores se guardan en un archivo de historial | JSONL en `~/.local/state/koala/history.jsonl`; cada medición agrega una línea |
+| 3 | Historial continuo | Timer systemd `koala-medir.timer` (cada 5 min desde 90 s tras el boot) |
+| 4 | La GUI muestra el historial | Vista nueva **HISTORIAL** en `koala gui` (tabla con scroll) |
+| 5 | Filtrar por empresa | ComboBox con la unión de nombres presentes en el historial (`TODAS` por defecto) |
 
-**Solución**: 
-- **Script de instalación**: `scripts/install.sh` - instalación completa con un clic
-- **Comandos explícitos**: Instrucciones `cargo install --path .`
-- **Verificación**: Scripts de prueba post-instalación
+## 3) Antecedentes del código actual
 
-### 3. Falta de Inicio Automático
-**Problema**: KOALA no tenía configuración de inicio automático.
+- Cada medición produce un `EstadoGlobal` (`src/core/verdict.rs`) con `ts`, `estado`, `media_ms`, `peor_perdida` y el detalle por servidor. Hoy se **pisa siempre** el mismo archivo (`~/.cache/koala/state.json`): no queda historia.
+- `scripts/install.sh` ya crea `koala.service` (systemd --user) con `ExecStart=koala barra` y `Restart=always`. Como proceso residente no hace nada útil (envía el JSON del widget al journal). Ese arranque ya existe pero desperdiciado: es el punto de enganche para disparar `medir` al encender.
+- El lock de medición (`cache::tomar_lock`) serializa las mediciones: protege appends del historial.
 
-**Solución**:
-- **systemd**: Configuración de servicio de usuario para sistemas basados en systemd
-- **Autostart de escritorio**: Archivo `.desktop` para entornos sin systemd
-- **Preferencia**: Intenta systemd primero, fallback a autostart de escritorio
+## 4) Diseño del archivo de historial
 
-## Arquitectura de la Solución
+### Ruta
 
-### 1. Mejoras en `src/install.rs`
+- `$XDG_STATE_HOME/koala/history.jsonl` — defecto `~/.local/state/koala/history.jsonl`.
+- Override para desarrollo/tests: variable de entorno `KOALA_HISTORIAL`.
+- Nota: se usa `~/.local/state` (estado persistente) y **no** `~/.cache`: el cacheo lo borra a voluntad.
 
-```rust
-// Función de detección mejorada (establecida arriba de colocar_en_config)
-fn config_contiene_custom_koala(contenido: &str) -> bool {
-    // Parseo JSON preciso para verificación de ubicación exacta
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(contenido) {
-        // Verificar en diferentes arrays de módulos waybar
-        if let Some(modules) = json.get("bar").and_then(|bar| bar.get("modules")) {
-            // Verificar en "center", "left", "right" etc.
-            // ... (implementación detallada)
-        }
-    }
-    
-    // Fallback: verificación simple de cadena
-    contenido.contains("\"custom/koala\"")
-}
-```
+### Formato: JSON Lines (append-only)
 
-### 2. Script de Instalación Principal: `scripts/install.sh`
+Una medición por línea, JSON del `RegistroHistorial`. Nunca se reescribe el archivo entero por cada medición (al contrario de `state.json`).
 
-**Características**:
-- **Banner visual atractivo** con colores
-- **Verificación de prerequisitos** (cargo instalado)
-- **Modo debug** opcional
-- **Instalación robusta** con detección de errores
-- **Inicio automático** con doble método
-- **Tests post-instalación** automáticos
-- **Mensajes de ayuda** claros
+### Registro slim (proyección, no `EstadoGlobal` completo)
 
-**Pasos de ejecución**:
-```bash
-chmod +x scripts/install.sh
-./scripts/install.sh --debug  # Con modo debug
-o ./scripts/install.sh      # Normal
-```
-
-### 3. Scripts de Ayuda
-
-#### `scripts/test_installation.sh`
-- **Verificación de estado**: Verifica binario, archivos de configuración
-- **Tests de widget**: Valida JSON de salida de `koala barra`
-- **Tests de medición**: Verifica que `koala medir` funciona
-- **Diagnóstico de integración**: Verifica que waybar está correctamente configurado
-
-#### `scripts/debug_duplication.sh`
-- **Limpieza**: `$ ./scripts/debug_duplication.sh --clean` - limpia configuración para nueva instalación
-- **Verificación**: `$ ./scripts/debug_duplication.sh` - verifica estado actual
-- **Debuggear**: `$ ./scripts/debug_duplication.sh --install` - ejecuta instalación para depurar
-- **Testear**: `$ ./scripts/debug_duplication.sh --test` - ejecuta tests de widget
-
-### 4. Documentación Completa
-
-#### `README.md`
-- **Guía de instalación** clara y paso a paso
-- **Explicación completa de comandos**
-- **Sección de solución de problemas** detallada
-- **Guía de uso diario** para usuarios nuevos
-
-#### `analysis_report.md`
-- **Análisis técnico** del problema de duplicación
-- **Código completo** de funciones mejoradas
-- **Pasos para solucionar** técnicos
-- **Referencia de implementación** para desarrolladores
-
-## Instrucciones para el Usuario
-
-### Paso 1: Instalar KOALA
-
-```bash
-# Opción 1: Usar script de instalación recomendado
-cd /home/johnd/Música/SOFTWARE/KOALA
-chmod +x scripts/install.sh
-./scripts/install.sh
-
-# Opción 2: Comando manual simple
-cd /home/johnd/Música/SOFTWARE/KOALA
-cargo install --path .
-```
-
-### Paso 2: Verificar Instalación
-
-```bash
-# Verificar si el binario funciona
-koala --version
-
-# Probar widget (JSON)
-koala barra
-
-# Ejecutar medición rápida
-koala medir
-
-# Abrir ventana gráfica
-koala gui
-```
-
-### Paso 3: Integrar con Waybar
-
-```bash
-# Integrar con waybar (idempotente - seguro ejecutar múltiples veces)
-koala instalar
-
-# Reiniciar waybar
-killall waybar && waybar
-```
-
-### Paso 4: Verificar Configuración
-
-```bash
-# Ejecutar tests post-instalación
-./scripts/test_installation.sh
-
-# Si hay problemas, depurar
-./scripts/debug_duplication.sh --test
-```
-
-## Verificación de la Solución
-
-### Test de Duplicación
-
-**Antes de la solución**:
-```bash
-grep -o '"custom/koala"' ~/.config/waybar/config.jsonc | wc -l
-# Resultados: 2, 3, 4, ... (duplicados)
-```
-
-**Después de la solución**:
-```bash
-grep -o '"custom/koala"' ~/.config/waybar/config.jsonc | wc -l
-# Resultado: 1 (sin duplicación)
-```
-
-### Test de Integración
-
-El script de prueba verifica:
-- Binario instalado correctamente
-- Archivos de configuración creados
-- Archivo JSON del widget es válido
-- Mediciones de ping funcionan
-- Inicio automático está configurado
-
-## Mantenimiento y Actualización
-
-### Actualizar KOALA
-
-```bash
-cd /home/johnd/Música/SOFTWARE/KOALA
-cargo install --path . --force
-./scripts/install.sh  # Re-integra con waybar si es necesario
-```
-
-### Reinstalar desde cero
-
-```bash
-# Limpiar todo
-./scripts/debug_duplication.sh --clean
-
-# Reinstalar
-./scripts/install.sh
-```
-
-## Para Desarrolladores
-
-### Modificar `install.rs`
-
-La nueva función `config_contiene_custom_koala()` proporciona una base robusta para futuras mejoras:
+El `EstadoGlobal` incluye las 30+ IPs individuales: pesado e inútil para un historial filtrable. Se guarda la proyección:
 
 ```rust
-// Puedes extender esto para más ubicaciones de módulos:
-fn config_contiene_custom_koala(contenido: &str) -> bool {
-    // Agrega más verificaciones aquí
-    // ...
+#[derive(Serialize, Deserialize, Clone)]
+pub struct EmpresaHistorial {
+    pub nombre: String,
+    pub media: Option<f32>,
+    pub jitter: Option<f32>,
+    pub peor_perdida: u8,
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RegistroHistorial {
+    pub ts: u64,
+    pub estado: Estado,
+    pub media_ms: Option<f32>,
+    pub peor_perdida: u8,
+    pub empresas: Vec<EmpresaHistorial>,
+}
+
+impl From<&EstadoGlobal> for RegistroHistorial { /* descarta ips[] individuales */ }
 ```
 
-### Agregar Nuevo Widget a Waybar
+~400–500 bytes por línea. Con medición cada 5 min: ~2 MB en 17 días.
 
-El script de instalación añade automáticamente `custom/koala` a waybar. Para agregar más widgets:
+### Retención
 
-```rust
-fn agregar_widget_al_config(config_path: &PathBuf, nuevo_widget: &str) -> Result<(), String> {
-    // Implementa detección y adición idempotente
-    // ...
-}
-```
+- `HISTORIAL_MAX_REGISTROS = 5000` líneas (~17 días a 5 min).
+- Al superar `HISTORIAL_LIMITE_BYTES = 4 MiB`, **compaction**: reescribir conservando la cola del archivo (~75 % final, recortado en frontera de línea). El chequeo es solo `fs::metadata` (barato, por append).
 
-## Compatibilidad y Requisitos
+### Lectura tolerante
 
-### Requisitos del Sistema
-- **Rust 1.70+** (edition 2024)
-- **Linux** (o cualquier sistema compatible con waybar)
-- **waybar** (panel) + **HyDE** (extensión) para Hyprland
+Líneas corruptas (apagado durante un append, escritura parcial): `serde_json::from_str` falla → la línea **se ignora** sin afectar el resto del historial.
 
-### Compatibilidad
-- **systemd**: Configuración automática de inicio para sistemas basados en systemd
-- **Entornos de escritorio**: Archivo `.desktop` de fallback
-- **Doble modo**: Intenta mejor método primero, fallback al siguiente
+## 5) Arranque automático al encender la computadora
 
-## Garantía de Calidad
+Lo agrega `koala instalar` (`src/install.rs`, paso 5/5, idempotente) con systemd --user:
 
-### Tests Automaticos
-1. **Verificación de compilación**: `cargo build --release`
-2. **Test de widget**: `koala barra` → JSON válido
-3. **Test de medición**: `koala medir` → ejecuta exitosamente
-4. **Detección de duplicación**: script verifica exactamente una ocurrencia
-5. **Integración de inicio automático**: verifica que servicio/archivo .desktop existe
+| unidad | contenido |
+|--------|-----------|
+| `~/.config/systemd/user/koala.service` | `Type=oneshot` · `ExecStart=%h/.cargo/bin/koala medir` · `WantedBy=default.target` → **1 medición en cada boot** (reemplaza el `barra` activo actual) |
+| `~/.config/systemd/user/koala-medir.timer` | `OnBootSec=90s` · `OnUnitActiveSec=300s` · `Unit=koala.service` → historial continuo |
 
-### Verificación Manual
-1. **Widget de waybar**: aparece una vez, muestra estado correcto
-2. **GUI**: `koala gui` abre ventana correctamente
-3. **Inicio automático**: KOALA corre al iniciar sesión
-4. **No hay duplicados**: ejecutar `koala instalar` 3 veces no crea duplicados
+Acciones del instalador: escribir ambas unidades → `systemctl --user daemon-reload` → `systemctl --user enable --now koala-medir.timer`.
 
-## Resumen Técnico
+- **Fallback sin systemctl**: `~/.config/autostart/koala-medir.desktop` (`Exec=koala medir`) → 1 registro por boot (historial más ralo).
+- **Nota:** sin `linger`, el servicio usuario arranca en el primer login, que es suficiente para el historial.
+- **Compatible con el script viejo:** `scripts/install.sh` escribe el mismo `koala.service`; se actualiza a `medir` oneshot para que ambos caminos coincidan.
 
-### Optimizaciones Clave
+## 6) Cambios por archivo
 
-1. **Verificación de duplicación precisa** (O(1) vs O(n) compleja):
-   - Antes: Escaneo lineal de archivo completo
-   - Después: Parseo JSON + verificación de ubicación
+| archivo | cambio |
+|---------|--------|
+| `src/core/histo.rs` (**NUEVO**, `pub mod histo;` en `core/mod.rs`) | `agregar(&EstadoGlobal)` (proyecta + append), `cargar_ultimas(n)`, compaction, ruta con `$XDG_STATE_HOME`/`$KOALA_HISTORIAL`. Tests: crear+append en tmp, trim por MAX, lectura ignora corruptas, proyección `From<&EstadoGlobal>` |
+| `src/app.rs` | En `medir()`, tras `cache::guardar()` → `histo::agregar(&estado)`. Solo medición fresca: el lock evita writes concurrentes y el retorno del caché no se duplica |
+| `src/core/config.rs` | Constantes `HISTORIAL_MAX_REGISTROS`, `HISTORIAL_LIMITE_BYTES` |
+| `src/gui.rs` | Vista **HISTORIAL** (ver §7) |
+| `Cargo.toml` | `chrono = "0.4"` — única dependencia nueva (hora local en la GUI) |
+| `src/install.rs` | Paso 5/5: unidades systemd + fallback autostart |
+| `scripts/install.sh` | `koala.service` pasa de `barra` residente a `medir` oneshot (coincide con install.rs) |
+| `README.md` | Sección "Historial": formato, ruta, retención, systemd |
 
-2. **Detección robusta de marcadores** (defensa en profundidad):
-   - Verificación de conteo de marcadores
-   - Fallback a verificación de cadena simple
+## 7) Vista HISTORIAL en la GUI
 
-3. **Flujos de inicio automático inteligentes**:
-   - systemd con verificación de estado
-   - Autostart de escritorio como fallback
-   - Mensajes de error claros
+- Toggle arriba: `[VEREDICTO | HISTORIAL]` (mismo panel central; el veredicto actual no cambia).
+- **Filtro por empresa:** ComboBox `EMPRESA: TODAS / GOOGLE / CLOUDFARE / ... / FACEBOOK / INSTAGRAM`, con la **unión de los nombres que aparecen en el historial** (sobrevive cambios/renombres en `ips.json`).
+- Columnas con `TODAS`: `HORA · ESTADO (color) · MEDIA ms · PEOR PÉRDIDA %`.
+- Columnas con `EMPRESA = X`: `HORA · ms(X) · JITTER(X) · PÉRDIDA(X) · ESTADO(X)` — cada fila corresponde al entry `empresas[]` del registro con `nombre == X`; fila «—» si no estaba ese proveedor.
+- Carga: `histo::cargar_ultimas(1000)` la primera vez que se abre la vista, cacheada en el struct de la app; botón **ACTUALIZAR** para refetch.
+- Hora local con `chrono`: `%H:%M`; con día si no es hoy (`05/11 14:32`).
+- Misma paleta existente (`COL_OK / COL_WARN / COL_BAD / COL_OFF`).
 
-4. **Documentación completa**:
-   - Guías paso a paso
-   - Referencia de solución de problemas
-   - Notas para desarrolladores
+## 8) Casos borde cubiertos
 
-### Complejidad Temporal y Espacial
+- **Primera medición:** archivo/directorio no existen → se crean.
+- **Append interrumpido** (apagón): línea incompleta ignorada al leer.
+- **Mediciones concurrentes:** imposibles por el lock de `medir`.
+- **Rotación de nombres** en `ips.json`: el filtro usa la unión histórica de nombres; nada se descarta.
+- **SIN RED:** el registro `Offline` igual se guarda con latencias «—» (timeline de cortes de conexión).
+- **Privacidad/datos:** todo queda local; no hay tráfico de red extra (no packs, "absolutely nothing" no: solo `ping` como ya lo hace).
 
-- **Detección de duplicación**: O(n) donde n es tamaño del archivo (parseo JSON) vs O(n) con verificación simple
-- **Memoria**: Sin aumento significativo (usar referencias en lugar de copias)
-- **Redundancia**: Múltiples defensas contra escenarios edge-case
+## 9) Fases de implementación
 
-## Conclusión
+1. **Fase 1 (core + GUI tabla):** `histo.rs`, config, `app.rs` append, systemd, vista tabla con filtro — todo lo funcional.
+2. **Fase 2 (opcional):** sparkline/gráfico de línea de `media_ms` con `egui_plot` (dependencia extra, a evaluar).
+3. **Fase 3 (opcional):** exportar CSV del rango filtrado.
 
-✅ **Problema de duplicación resuelto**: `koala instalar` ahora es verdaderamente idempotente
-✅ **Instalación completa** con un solo comando disponible
-✅ **Inicio automático** con método dual confiable
-✅ **Documentación exhaustiva** con guías y referencias
-✅ **Tests robustos** para verificación post-instalación
-✅ **Herramientas de depuración** para solución de problemas
+## 10) Criterios de aceptación
 
-Esta implementación resuelve completamente las demandas del usuario:
-1. Proporciona comandos de instalación usando cargo
-2. Configura inicio automático
-3. Elimina el problema de duplicación en waybar
-4. Proporciona herramientas de seguimiento y depuración completas
+1. `cargo test` OK (tests nuevos de `histo.rs`).
+2. Tras `koala instalar`: `systemctl --user list-timers` muestra `koala-medir.timer`; cada medición suma 1 línea (`wc -l`).
+3. Al encender: archivo con un registro cuyo `ts` corresponde al arranque.
+4. GUI: elegir `FACEBOOK` muestra la serie de `www.facebook.com`; `TODAS` muestra el global.
+5. `~/.local/state/koala/history.jsonl` persiste entre boots.
+
+## 11) Resumen de los disparadores de medición (pulse)
+
+| disparo | registrar? |
+|---------|-----------|
+| `koala.service` systemd en boot (oneshot) | sí (bootstrap) |
+| `koala-medir.timer` cada 5 min | sí (ritmo continuo) |
+| Clic izquierdo en widget = `koala medir` | sí |
+| Refresco automático activable | sí (es `koala medir` igual) |
+| `barra` (pintar widget del caché) | **no** (no mide) |
+
+Thought · 2.2s
+Corrijo una frase confusa que quedó en §8:
+← Edit~/.opencode/plan/koala-historial.md
+- **Append interrumpido** (apagón): línea incompleta ignorada al leer.
+- **Mediciones concurrentes:** imposibles por el lock de `medir`.
+- **Rotación de nombres** en `ips.json`: el filtro usa la unión histórica de nombres; nada se descarta.
+- **SIN RED:** el registro `Offline` igual se guarda con latencias «—» (timeline de cortes de conexión).
+- **Privacidad/datos:** todo queda local; no hay tráfico de red extra (no packs, "absolutely nothing" no: solo `ping` como ya lo hace).
+- **Privacidad/datos:** todo queda local; no hay tráfico de extra de red, solo el `ping` que ya se ejecuta hoy.
+
+## 9) Fases de implementación
+
+1. **Fase 1 (core + GUI tabla):** `histo.rs`, config, `app.rs` append, systemd, vista tabla con filtro — todo lo funcional.
+← Edit~/.opencode/plan/koala-historial.md
+- **Append interrumpido** (apagón): línea incompleta ignorada al leer.
+- **Mediciones concurrentes:** imposibles por el lock de `medir`.
+- **Rotación de nombres** en `ips.json`: el filtro usa la unión histórica de nombres; nada se descarta.
+- **SIN RED:** el registro `Offline` igual se guarda con latencias «—» (timeline de cortes de conexión).
+- **Privacidad/datos:** todo queda local; no hay tráfico de extra de red, solo el `ping` que ya se ejecuta hoy.
+- **Privacidad/datos:** todo queda local; no hay tráfico extra de red, solo el `ping` que ya se ejecuta hoy.
+
+## 9) Fases de implementación
+
+1. **Fase 1 (core + GUI tabla):** `histo.rs`, config, `app.rs` append, systemd, vista tabla con filtro — todo lo funcional.

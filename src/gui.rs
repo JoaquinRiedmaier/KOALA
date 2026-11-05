@@ -21,7 +21,7 @@ pub fn ejecutar() {
     let opciones = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("kOala — medidor de internet")
-            .with_inner_size([430.0, 400.0])
+            .with_inner_size([430.0, 470.0])
             .with_resizable(true),
         ..Default::default()
     };
@@ -150,26 +150,35 @@ impl eframe::App for KoalaApp {
 
                 // ── Tabla por proveedor ──
                 if let Some(e) = &self.estado {
-                    egui::Grid::new("proveedores")
-                        .num_columns(4)
-                        .spacing([12.0, 4.0])
+                    // scroll vertical: con 11+ filas ya no entra en la ventana;
+                    // deja ~50 px para el botón inferior
+                    let max_altura = (ui.available_height() - 50.0).max(120.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("tabla_proveedores")
+                        .auto_shrink([false, false])
+                        .max_height(max_altura)
                         .show(ui, |ui| {
-                            ui.label(RichText::new("PROVEEDOR").color(COL_IDLE).weak());
-                            ui.label(RichText::new("PING").color(COL_IDLE).weak());
-                            ui.label(RichText::new("PERDIDA").color(COL_IDLE).weak());
-                            ui.label(RichText::new("ESTADO").color(COL_IDLE).weak());
-                            ui.end_row();
-                            for p in &e.proveedores {
-                                let color = self.color_de_proveedor(p);
-                                ui.label(RichText::new(&p.nombre).color(COL_TEXTO));
-                                ui.label(RichText::new(match p.media {
-                                    Some(m) => format!("{:.1} ms", m),
-                                    None => "—".into(),
-                                }).color(COL_TEXTO));
-                                ui.label(RichText::new(format!("{:.0}%", p.peor_perdida as f32)).color(COL_TEXTO));
-                                ui.label(RichText::new(p.etiqueta()).color(color));
-                                ui.end_row();
-                            }
+                            egui::Grid::new("proveedores")
+                                .num_columns(4)
+                                .spacing([12.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("PROVEEDOR").color(COL_IDLE).weak());
+                                    ui.label(RichText::new("PING").color(COL_IDLE).weak());
+                                    ui.label(RichText::new("PERDIDA").color(COL_IDLE).weak());
+                                    ui.label(RichText::new("ESTADO").color(COL_IDLE).weak());
+                                    ui.end_row();
+                                    for p in &e.proveedores {
+                                        let color = self.color_de_proveedor(p);
+                                        ui.label(RichText::new(&p.nombre).color(COL_TEXTO));
+                                        ui.label(RichText::new(match p.media {
+                                            Some(m) => format!("{:.1} ms", m),
+                                            None => "—".into(),
+                                        }).color(COL_TEXTO));
+                                        ui.label(RichText::new(format!("{:.0}%", p.peor_perdida as f32)).color(COL_TEXTO));
+                                        ui.label(RichText::new(p.etiqueta()).color(color));
+                                        ui.end_row();
+                                    }
+                                });
                         });
                 }
 
