@@ -123,7 +123,8 @@ install_to_waybar() {
     echo "  3. Agregar estilos CSS en ~/.config/waybar/user-style.css"
     echo "  4. Colocar el módulo en ~/.config/waybar/config.jsonc"
     echo "  5. Agregar regla de ventana flotante a Hyprland"
-    echo "  6. Reiniciar waybar si está corriendo"
+    echo "  6. Activar la medición al iniciar sesión (koala-medir.timer)"
+    echo "  7. Reiniciar waybar si algo cambió"
     echo ""
     
     if $CARGO_BIN instalar; then

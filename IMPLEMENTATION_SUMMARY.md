@@ -1,51 +1,48 @@
-# KOALA — Historial de Mediciones de Ping (Plan de Implementación)
-
-> Este es el contenido final de `/home/johnd/Música/SOFTWARE/KOALA/IMPLEMENTATION_SUMMARY.md`:
-> el documento contendrá ÚNICAMENTE este plan de implementación (sin notas de pendientes ni
-> decisiones internas). Se escribirá al pasar al agente de build.
-
----
-
 # KOALA — Historial de Mediciones de Ping
+
+Plan de implementación. La Fase 1 está implementada; las fases 2 y 3 son opcionales.
 
 ## 1) Objetivo
 
-Al encender la computadora, KOALA debe comenzar a **registrar los valores de ping en un archivo persistente**. La interfaz gráfica (`koala gui`) mostrará un **historial** de esas mediciones, con **filtro por empresa** (proveedor: Google, Cloudflare, Facebook, Instagram, etc.).
+Al iniciar sesión, KOALA hace **una medición** y la guarda en un **archivo persistente**, junto con las que el usuario pida después. No hay mediciones periódicas: fuera de la del inicio, solo se mide a pedido. La interfaz gráfica (`koala gui`) muestra un **historial** de esas mediciones, con **filtro por empresa** (proveedor: Google, Cloudflare, Facebook, Instagram, etc.).
+
+Hay un único archivo, que se crea en la primera medición y se conserva entre reinicios. No se crea uno nuevo en cada encendido.
 
 ## 2) Alcance funcional
 
 | # | Requisito | Cómo se cumple |
 |---|-----------|----------------|
-| 1 | Al encender la PC se registra el primer valor | Unidad systemd `koala.service` (oneshot `koala medir`) habilitada en el arranque del usuario |
+| 1 | Al iniciar se registra un valor | Timer systemd de usuario `koala-medir.timer`, una vez, 60 s después de iniciar sesión |
 | 2 | Los valores se guardan en un archivo de historial | JSONL en `~/.local/state/koala/history.jsonl`; cada medición agrega una línea |
-| 3 | Historial continuo | Timer systemd `koala-medir.timer` (cada 5 min desde 90 s tras el boot) |
+| 3 | Mediciones siguientes | Solo manuales: clic en el widget, abrir la GUI o "Re-medir" |
 | 4 | La GUI muestra el historial | Vista nueva **HISTORIAL** en `koala gui` (tabla con scroll) |
 | 5 | Filtrar por empresa | ComboBox con la unión de nombres presentes en el historial (`TODAS` por defecto) |
 
-## 3) Antecedentes del código actual
+## 3) Antecedentes del código
 
-- Cada medición produce un `EstadoGlobal` (`src/core/verdict.rs`) con `ts`, `estado`, `media_ms`, `peor_perdida` y el detalle por servidor. Hoy se **pisa siempre** el mismo archivo (`~/.cache/koala/state.json`): no queda historia.
-- `scripts/install.sh` ya crea `koala.service` (systemd --user) con `ExecStart=koala barra` y `Restart=always`. Como proceso residente no hace nada útil (envía el JSON del widget al journal). Ese arranque ya existe pero desperdiciado: es el punto de enganche para disparar `medir` al encender.
-- El lock de medición (`cache::tomar_lock`) serializa las mediciones: protege appends del historial.
+- Cada medición produce un `EstadoGlobal` (`src/core/verdict.rs`) con `ts`, `estado`, `media_ms`, `peor_perdida` y el detalle por servidor. `~/.cache/koala/state.json` guarda solo la última: no queda historia.
+- El refresco automático (`AUTO_REFRESH`) está apagado a pedido del usuario: se mide al hacer clic en el widget o al abrir la GUI. Este plan no cambia eso; solo agrega la medición del inicio.
+- `koala instalar` se ejecuta en cada inicio de Hyprland (hook del usuario en `hyprland.lua`). Todo lo que agregue tiene que ser idempotente: si no hay nada que cambiar, no escribe ni recarga nada.
+- El lock de medición (`cache::tomar_lock`) serializa las mediciones. El append se hace mientras se tiene el lock.
 
 ## 4) Diseño del archivo de historial
 
 ### Ruta
 
-- `$XDG_STATE_HOME/koala/history.jsonl` — defecto `~/.local/state/koala/history.jsonl`.
-- Override para desarrollo/tests: variable de entorno `KOALA_HISTORIAL`.
-- Nota: se usa `~/.local/state` (estado persistente) y **no** `~/.cache`: el cacheo lo borra a voluntad.
+- `$XDG_STATE_HOME/koala/history.jsonl` — por defecto `~/.local/state/koala/history.jsonl`.
+- Override: variable de entorno `KOALA_HISTORIAL`.
+- Se usa `~/.local/state` y **no** `~/.cache`, porque el caché se puede borrar en cualquier momento.
 
 ### Formato: JSON Lines (append-only)
 
-Una medición por línea, JSON del `RegistroHistorial`. Nunca se reescribe el archivo entero por cada medición (al contrario de `state.json`).
+Una medición por línea, JSON del `RegistroHistorial`. Nunca se reescribe el archivo entero por cada medición.
 
-### Registro slim (proyección, no `EstadoGlobal` completo)
+### Registro reducido (no el `EstadoGlobal` completo)
 
-El `EstadoGlobal` incluye las 30+ IPs individuales: pesado e inútil para un historial filtrable. Se guarda la proyección:
+El `EstadoGlobal` incluye las 28 IPs y dominios individuales, algo pesado e innecesario para un historial por empresa. Se guarda esta proyección, con latencias redondeadas a 0,1 ms:
 
 ```rust
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EmpresaHistorial {
     pub nombre: String,
     pub media: Option<f32>,
@@ -53,7 +50,7 @@ pub struct EmpresaHistorial {
     pub peor_perdida: u8,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RegistroHistorial {
     pub ts: u64,
     pub estado: Estado,
@@ -62,112 +59,131 @@ pub struct RegistroHistorial {
     pub empresas: Vec<EmpresaHistorial>,
 }
 
-impl From<&EstadoGlobal> for RegistroHistorial { /* descarta ips[] individuales */ }
+impl From<&EstadoGlobal> for RegistroHistorial { /* descarta las ips individuales */ }
 ```
 
-~400–500 bytes por línea. Con medición cada 5 min: ~2 MB en 17 días.
+El estado por empresa no se guarda: se deriva de `media`, `jitter` y `peor_perdida` con la misma regla que `Proveedor::etiqueta()`, compartida en `verdict::etiqueta_proveedor`.
+
+Tamaño: unos 820 bytes por línea con las 11 empresas actuales.
 
 ### Retención
 
-- `HISTORIAL_MAX_REGISTROS = 5000` líneas (~17 días a 5 min).
-- Al superar `HISTORIAL_LIMITE_BYTES = 4 MiB`, **compaction**: reescribir conservando la cola del archivo (~75 % final, recortado en frontera de línea). El chequeo es solo `fs::metadata` (barato, por append).
+- Hay un solo límite: `HISTORIAL_LIMITE_BYTES = 8 MiB`, unas 10.000 mediciones.
+- Al superarlo se **compacta**: se conserva el 75 % más reciente del límite, cortando en un límite de línea.
+- La compactación escribe un archivo temporal y lo renombra, para no perder el historial si hay un apagón a mitad de camino.
+- El chequeo es solo el tamaño del archivo, sin leerlo, por lo que es barato en cada append.
 
-### Lectura tolerante
+### Tolerancia a fallos
 
-Líneas corruptas (apagado durante un append, escritura parcial): `serde_json::from_str` falla → la línea **se ignora** sin afectar el resto del historial.
+- Una línea corrupta se ignora al leer, sin afectar al resto.
+- El archivo se lee como bytes (`from_utf8_lossy`): con `read_to_string`, un solo byte inválido descartaría todo el historial.
+- Si un apagón deja una línea sin terminar, el siguiente append agrega antes un salto de línea. Sin esto, la línea nueva se pegaría a la rota y también se perdería.
 
-## 5) Arranque automático al encender la computadora
+## 5) Arranque automático
 
-Lo agrega `koala instalar` (`src/install.rs`, paso 5/5, idempotente) con systemd --user:
+Lo agrega `koala instalar` (`src/install.rs`, paso 5/5) con systemd de usuario. `ExecStart` usa la ruta absoluta del binario en uso, igual que el módulo de waybar.
 
-| unidad | contenido |
-|--------|-----------|
-| `~/.config/systemd/user/koala.service` | `Type=oneshot` · `ExecStart=%h/.cargo/bin/koala medir` · `WantedBy=default.target` → **1 medición en cada boot** (reemplaza el `barra` activo actual) |
-| `~/.config/systemd/user/koala-medir.timer` | `OnBootSec=90s` · `OnUnitActiveSec=300s` · `Unit=koala.service` → historial continuo |
+`~/.config/systemd/user/koala-medir.service`:
 
-Acciones del instalador: escribir ambas unidades → `systemctl --user daemon-reload` → `systemctl --user enable --now koala-medir.timer`.
+```ini
+[Unit]
+Description=KOALA: registra una medición en el historial
 
-- **Fallback sin systemctl**: `~/.config/autostart/koala-medir.desktop` (`Exec=koala medir`) → 1 registro por boot (historial más ralo).
-- **Nota:** sin `linger`, el servicio usuario arranca en el primer login, que es suficiente para el historial.
-- **Compatible con el script viejo:** `scripts/install.sh` escribe el mismo `koala.service`; se actualiza a `medir` oneshot para que ambos caminos coincidan.
+[Service]
+Type=oneshot
+ExecStart=<ruta del binario> medir
+TimeoutStartSec=60
+```
+
+`~/.config/systemd/user/koala-medir.timer`:
+
+```ini
+[Unit]
+Description=KOALA: medición al iniciar sesión
+
+[Timer]
+OnStartupSec=60s
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+```
+
+Decisiones:
+
+- **No hay un servicio que mida en `default.target`.** Al iniciar sesión la red puede no estar lista y la primera fila sería un `SIN RED` falso. Los usuarios de systemd tampoco tienen `network.target` ni `network-online.target`, así que no se puede esperar a la red con una dependencia. Por eso se esperan 60 s.
+- **`OnStartupSec`, no `OnBootSec`.** `OnStartupSec` cuenta desde que arranca el systemd del usuario (el login). `OnBootSec` cuenta desde el encendido de la máquina y puede estar vencido al iniciar sesión.
+- **Un solo disparo.** Sin `OnUnitActiveSec` ni `OnCalendar`, el timer dispara una vez cada vez que arranca el systemd del usuario. Un test lo controla.
+- **`[Install]` es obligatorio en el timer.** Sin `WantedBy=timers.target`, `systemctl enable` no tiene nada que habilitar.
+- **Nombre `koala-medir.service`.** No se reutiliza `koala.service`, que corresponde a la versión vieja con `barra`. Si `koala instalar` encuentra esa unidad, la deshabilita y la borra.
+- **Sin `--now`.** `enable --now` mediría en el momento de instalar, porque `OnStartupSec` ya estaría vencido. Con `enable` solo, la primera medición llega en el próximo login.
+- **Idempotente.** Las unidades se escriben solo si cambiaron, y `daemon-reload` y `enable` corren solo en ese caso. Si el usuario deshabilita el timer, un inicio posterior no lo vuelve a habilitar. Si `systemctl` falla, se borra el timer recién escrito para reintentar en la próxima ejecución.
+- **Solo systemd.** Sin `systemctl`, el resto de la instalación sigue y se avisa del fallo.
+- **Sin `linger`.** El timer depende del systemd del usuario, que arranca en el primer login y corre en cualquier escritorio (Hyprland, GNOME). Una nueva sesión mide de nuevo solo si antes se cerraron todas.
+
+`scripts/install.sh` no escribe unidades: llama a `koala instalar`, así hay un solo lugar que las define.
 
 ## 6) Cambios por archivo
 
-| archivo | cambio |
+| Archivo | Cambio |
 |---------|--------|
-| `src/core/histo.rs` (**NUEVO**, `pub mod histo;` en `core/mod.rs`) | `agregar(&EstadoGlobal)` (proyecta + append), `cargar_ultimas(n)`, compaction, ruta con `$XDG_STATE_HOME`/`$KOALA_HISTORIAL`. Tests: crear+append en tmp, trim por MAX, lectura ignora corruptas, proyección `From<&EstadoGlobal>` |
-| `src/app.rs` | En `medir()`, tras `cache::guardar()` → `histo::agregar(&estado)`. Solo medición fresca: el lock evita writes concurrentes y el retorno del caché no se duplica |
-| `src/core/config.rs` | Constantes `HISTORIAL_MAX_REGISTROS`, `HISTORIAL_LIMITE_BYTES` |
-| `src/gui.rs` | Vista **HISTORIAL** (ver §7) |
-| `Cargo.toml` | `chrono = "0.4"` — única dependencia nueva (hora local en la GUI) |
-| `src/install.rs` | Paso 5/5: unidades systemd + fallback autostart |
-| `scripts/install.sh` | `koala.service` pasa de `barra` residente a `medir` oneshot (coincide con install.rs) |
-| `README.md` | Sección "Historial": formato, ruta, retención, systemd |
+| `src/core/histo.rs` (**nuevo**) | `agregar`, `cargar`, `nombres_empresas`, compactación y ruta. Tests: crear y agregar, recorte por tamaño, líneas corruptas, línea sin terminar y proyección |
+| `src/core/mod.rs` | `pub mod histo;` |
+| `src/core/verdict.rs` | `etiqueta_proveedor(media, jitter, peor_perdida)`, compartida con `Proveedor::etiqueta()` |
+| `src/app.rs` | En `medir()`, `histo::agregar(&estado)` antes de soltar el lock. Si falla, se avisa por stderr y no invalida la medición |
+| `src/core/config.rs` | Constante `HISTORIAL_LIMITE_BYTES` |
+| `src/gui.rs` | Vista **HISTORIAL** (§7) |
+| `Cargo.toml` | `chrono` sin features por defecto, solo `clock` (hora local en la GUI) |
+| `src/install.rs` | Paso 5/5: unidades systemd y retiro de `koala.service` viejo |
+| `scripts/install.sh` | Solo actualiza el resumen de pasos |
+| `README.md` | Sección "Historial" |
 
 ## 7) Vista HISTORIAL en la GUI
 
-- Toggle arriba: `[VEREDICTO | HISTORIAL]` (mismo panel central; el veredicto actual no cambia).
-- **Filtro por empresa:** ComboBox `EMPRESA: TODAS / GOOGLE / CLOUDFARE / ... / FACEBOOK / INSTAGRAM`, con la **unión de los nombres que aparecen en el historial** (sobrevive cambios/renombres en `ips.json`).
-- Columnas con `TODAS`: `HORA · ESTADO (color) · MEDIA ms · PEOR PÉRDIDA %`.
-- Columnas con `EMPRESA = X`: `HORA · ms(X) · JITTER(X) · PÉRDIDA(X) · ESTADO(X)` — cada fila corresponde al entry `empresas[]` del registro con `nombre == X`; fila «—» si no estaba ese proveedor.
-- Carga: `histo::cargar_ultimas(1000)` la primera vez que se abre la vista, cacheada en el struct de la app; botón **ACTUALIZAR** para refetch.
-- Hora local con `chrono`: `%H:%M`; con día si no es hoy (`05/11 14:32`).
+- Selector arriba: `[VEREDICTO | HISTORIAL]`. La vista de veredicto no cambia.
+- **Filtro por empresa:** ComboBox `TODAS / GOOGLE / CLOUDFLARE / ... / INSTAGRAM`, con la unión de los nombres que aparecen en el historial (sobrevive a cambios en `ips.json`).
+- Con `TODAS`: `HORA · ESTADO · MEDIA · PÉRDIDA`.
+- Con una empresa: `HORA · PING · JITTER · PÉRDIDA · ESTADO`. Si esa medición no incluía a la empresa, la fila muestra `—`.
+- Las filas más recientes van primero.
+- Se carga el historial completo al abrir la vista. La tabla usa `ScrollArea::show_rows`, que solo dibuja las filas visibles, así que no hace falta limitar la cantidad.
+- Botón **ACTUALIZAR** para releer el archivo. También se relee después de una medición hecha desde la GUI.
+- Hora local con `chrono`: `14:32`, o `05/11 14:32` si no es de hoy.
 - Misma paleta existente (`COL_OK / COL_WARN / COL_BAD / COL_OFF`).
 
-## 8) Casos borde cubiertos
+## 8) Casos borde
 
-- **Primera medición:** archivo/directorio no existen → se crean.
-- **Append interrumpido** (apagón): línea incompleta ignorada al leer.
-- **Mediciones concurrentes:** imposibles por el lock de `medir`.
-- **Rotación de nombres** en `ips.json`: el filtro usa la unión histórica de nombres; nada se descarta.
-- **SIN RED:** el registro `Offline` igual se guarda con latencias «—» (timeline de cortes de conexión).
-- **Privacidad/datos:** todo queda local; no hay tráfico de red extra (no packs, "absolutely nothing" no: solo `ping` como ya lo hace).
+- **Primera medición:** el archivo y el directorio se crean si no existen.
+- **Apagón durante un append o una compactación:** ver §4.
+- **Mediciones concurrentes:** el lock de `medir` las evita; la que llega segunda devuelve el caché y no agrega nada.
+- **Cambio de nombres en `ips.json`:** el filtro usa la unión histórica; un nombre nuevo es una serie nueva.
+- **SIN RED:** el registro `Offline` se guarda igual, con latencias vacías (sirve como línea de tiempo de cortes).
+- **Privacidad:** todo queda en el disco local.
+- **Tráfico de red:** cada medición son 28 destinos × 4 pings, 112 paquetes ICMP. La del inicio agrega una por login.
 
 ## 9) Fases de implementación
 
-1. **Fase 1 (core + GUI tabla):** `histo.rs`, config, `app.rs` append, systemd, vista tabla con filtro — todo lo funcional.
-2. **Fase 2 (opcional):** sparkline/gráfico de línea de `media_ms` con `egui_plot` (dependencia extra, a evaluar).
-3. **Fase 3 (opcional):** exportar CSV del rango filtrado.
+1. **Fase 1:** `histo.rs`, configuración, append en `medir`, systemd y vista de tabla con filtro.
+2. **Fase 2 (opcional):** gráfico de `media_ms`, dibujado con `egui::Painter` para evitar una dependencia nueva.
+3. **Fase 3 (opcional):** exportar a CSV lo filtrado.
 
 ## 10) Criterios de aceptación
 
-1. `cargo test` OK (tests nuevos de `histo.rs`).
-2. Tras `koala instalar`: `systemctl --user list-timers` muestra `koala-medir.timer`; cada medición suma 1 línea (`wc -l`).
-3. Al encender: archivo con un registro cuyo `ts` corresponde al arranque.
-4. GUI: elegir `FACEBOOK` muestra la serie de `www.facebook.com`; `TODAS` muestra el global.
-5. `~/.local/state/koala/history.jsonl` persiste entre boots.
+1. `cargo test` pasa, con los tests nuevos de `histo.rs`.
+2. Tras `koala instalar`, `koala-medir.timer` queda habilitado y no se mide nada en ese momento.
+3. Un minuto después de iniciar sesión hay un registro nuevo con esa hora, y no aparecen más sin pedirlos.
+4. En la GUI, elegir `FACEBOOK` muestra la serie de esa empresa, y `TODAS` muestra la global.
+5. El archivo persiste entre reinicios.
+6. Repetir `koala instalar` no modifica ningún archivo ni recarga nada.
 
-## 11) Resumen de los disparadores de medición (pulse)
+## 11) Qué dispara un registro
 
-| disparo | registrar? |
-|---------|-----------|
-| `koala.service` systemd en boot (oneshot) | sí (bootstrap) |
-| `koala-medir.timer` cada 5 min | sí (ritmo continuo) |
-| Clic izquierdo en widget = `koala medir` | sí |
-| Refresco automático activable | sí (es `koala medir` igual) |
-| `barra` (pintar widget del caché) | **no** (no mide) |
+| Disparador | ¿Registra? |
+|------------|-----------|
+| `koala-medir.timer`, una vez, 60 s tras el login | Sí |
+| Clic izquierdo en el widget (`koala medir`) | Sí |
+| Abrir `koala gui` o tocar "Re-medir" | Sí |
+| Refresco automático, si el usuario lo activa | Sí |
+| Medición bloqueada por el lock | No (devuelve el caché) |
+| `koala barra` (pinta el widget desde el caché) | No |
 
-Thought · 2.2s
-Corrijo una frase confusa que quedó en §8:
-← Edit~/.opencode/plan/koala-historial.md
-- **Append interrumpido** (apagón): línea incompleta ignorada al leer.
-- **Mediciones concurrentes:** imposibles por el lock de `medir`.
-- **Rotación de nombres** en `ips.json`: el filtro usa la unión histórica de nombres; nada se descarta.
-- **SIN RED:** el registro `Offline` igual se guarda con latencias «—» (timeline de cortes de conexión).
-- **Privacidad/datos:** todo queda local; no hay tráfico de red extra (no packs, "absolutely nothing" no: solo `ping` como ya lo hace).
-- **Privacidad/datos:** todo queda local; no hay tráfico de extra de red, solo el `ping` que ya se ejecuta hoy.
-
-## 9) Fases de implementación
-
-1. **Fase 1 (core + GUI tabla):** `histo.rs`, config, `app.rs` append, systemd, vista tabla con filtro — todo lo funcional.
-← Edit~/.opencode/plan/koala-historial.md
-- **Append interrumpido** (apagón): línea incompleta ignorada al leer.
-- **Mediciones concurrentes:** imposibles por el lock de `medir`.
-- **Rotación de nombres** en `ips.json`: el filtro usa la unión histórica de nombres; nada se descarta.
-- **SIN RED:** el registro `Offline` igual se guarda con latencias «—» (timeline de cortes de conexión).
-- **Privacidad/datos:** todo queda local; no hay tráfico de extra de red, solo el `ping` que ya se ejecuta hoy.
-- **Privacidad/datos:** todo queda local; no hay tráfico extra de red, solo el `ping` que ya se ejecuta hoy.
-
-## 9) Fases de implementación
-
-1. **Fase 1 (core + GUI tabla):** `histo.rs`, config, `app.rs` append, systemd, vista tabla con filtro — todo lo funcional.
+El widget arranca cada sesión con un dato fresco. Después, ese dato envejece hasta la próxima medición manual, como hasta ahora.

@@ -4,10 +4,12 @@ use std::process::{Command, Stdio};
 
 use crate::core::cache;
 use crate::core::config;
+use crate::core::histo;
 use crate::core::ipfile;
 use crate::core::verdict::{evaluar, EstadoGlobal};
 
-/// `koala medir`: mide TODO, escribe el caché. La barra se refresca sola en su próximo tick.
+/// `koala medir`: mide TODO, escribe el caché y el historial. La barra se refresca sola
+/// en su próximo tick.
 pub fn comando_medir() {
     match medir() {
         Some(e) => println!("KOALA: {} — {}", e.texto(), formateo_humano_edad(e.edad())),
@@ -15,7 +17,7 @@ pub fn comando_medir() {
     }
 }
 
-/// Corre una medición completa y guarda el caché. Devuelve el estado calculado.
+/// Corre una medición completa y guarda el caché y el historial. Devuelve el estado calculado.
 /// Bloquea ~2–4 s (los pings corren en paralelo). Respeta el lock.
 pub fn medir() -> Option<EstadoGlobal> {
     if !cache::tomar_lock() {
@@ -24,6 +26,9 @@ pub fn medir() -> Option<EstadoGlobal> {
     let objetivos = ipfile::objetivos();
     let estado = evaluar(&objetivos);
     let ok = cache::guardar(&estado).is_ok();
+    if let Err(e) = histo::agregar(&estado) {
+        eprintln!("KOALA: no se pudo guardar el historial: {e}");
+    }
     cache::soltar_lock();
     if ok {
         Some(estado)

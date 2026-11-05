@@ -10,6 +10,7 @@ KOALA es una aplicación de terminal que analiza la conectividad de internet eje
 - **Ping a dominios** (www.facebook.com, www.instagram.com, ...): valida el DNS y la ruta real, integrado en el widget y en la GUI
 - **Widget para waybar** con indicadores visuales de estado
 - **Interfaz gráfica** para monitoreo en tiempo real
+- **Historial de mediciones** con filtro por empresa: una medición al iniciar sesión y las que pidas después
 - **Integración con HyDE** (Hyprland Desktop Environment)
 - **Configuración idempotente** - se puede ejecutar `koala instalar` múltiples veces sin crear duplicados
 
@@ -136,6 +137,20 @@ Contiene los estilos CSS para el widget KOALA con indicadores de color:
 
 Añade `custom/koala` a la barra. KOALA se añade al lado izquierdo junto a otros widgets.
 
+## Historial
+
+`koala instalar` activa `koala-medir.timer`, un timer de systemd de usuario que hace **una sola medición** 60 segundos después de iniciar sesión. Después solo se mide a pedido: clic en el widget, abrir `koala gui` o "Re-medir". Todas esas mediciones quedan en el historial.
+
+Para verlo, abrí `koala gui` y elegí **HISTORIAL**. Se puede filtrar por empresa.
+
+- **Archivo:** `~/.local/state/koala/history.jsonl`, una medición JSON por línea. Se crea en la primera medición, se conserva entre reinicios y se cambia con `$KOALA_HISTORIAL`.
+- **Retención:** al superar 8 MiB (unas 10.000 mediciones) se descartan las más viejas.
+
+```bash
+# Quitar la medición al iniciar sesión (el historial se conserva)
+systemctl --user disable --now koala-medir.timer
+```
+
 ## Lógica del estado y del tiempo mostrado
 
 Esta sección explica exactamente cómo se produce el texto del widget (`OK 13ms`, `LENTO 45ms`, `INESTABLE 60%`, `SIN RED`) y qué significa cada dato.
@@ -225,8 +240,8 @@ killall waybar && waybar
 
 ### Problema 2: El widget no aparece en waybar
 
-KOALA no necesita un servicio propio: waybar ejecuta `koala barra` cada 5 segundos. Si el widget
-desaparece (HyDE regenera `config.jsonc`), hay que volver a colocarlo:
+Waybar ejecuta `koala barra` cada 5 segundos, así que el widget no necesita un servicio propio.
+Si desaparece (HyDE regenera `config.jsonc`), hay que volver a colocarlo:
 
 **Solución**:
 ```bash

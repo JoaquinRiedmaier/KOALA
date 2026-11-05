@@ -19,6 +19,9 @@ pub const STALE_SECS: u64 = 600;
 /// Paquetes ping por IP (los umbrales de `verdict` están pensados para 4).
 pub const PINGS_POR_IP: u32 = 4;
 
+/// Tamaño máximo del historial. Al superarlo se conserva el 75 % más reciente.
+pub const HISTORIAL_LIMITE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// ¿Refresco automático? constant + override en runtime con `KOALA_AUTO_REFRESH=1`.
 pub fn auto_refresh_activado() -> bool {
     AUTO_REFRESH

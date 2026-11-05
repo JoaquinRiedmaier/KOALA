@@ -170,20 +170,23 @@ impl Estado {
     }
 }
 
+/// Estado textual de un proveedor a partir de sus métricas. Sin `media`, ninguna IP respondió.
+pub fn etiqueta_proveedor(media: Option<f32>, jitter: Option<f32>, peor_perdida: u8) -> &'static str {
+    if media.is_none() {
+        "SIN RESPUESTA"
+    } else if peor_perdida > LIMITE_PERDIDA {
+        "INESTABLE"
+    } else if media.is_some_and(|m| m > LIMITE_MS) || jitter.is_some_and(|j| j > LIMITE_JITTER) {
+        "LENTO"
+    } else {
+        "OK"
+    }
+}
+
 impl Proveedor {
     /// Estado textual de un proveedor, para GUI y tooltip.
     pub fn etiqueta(&self) -> &'static str {
-        if !self.al_alcance {
-            "SIN RESPUESTA"
-        } else if self.peor_perdida > LIMITE_PERDIDA {
-            "INESTABLE"
-        } else if self.media.is_some_and(|m| m > LIMITE_MS)
-            || self.jitter.is_some_and(|j| j > LIMITE_JITTER)
-        {
-            "LENTO"
-        } else {
-            "OK"
-        }
+        etiqueta_proveedor(self.media, self.jitter, self.peor_perdida)
     }
 }
 

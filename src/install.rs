@@ -5,7 +5,8 @@
 //!   2. `~/.config/waybar/modules/koala.jsonc` — definición del módulo (HyDE la incluye auto)
 //!   3. `~/.config/waybar/user-style.css`      — clases de color (bloque entre marcadores)
 //!   4. `~/.config/waybar/config.jsonc`        — coloca `custom/koala` en la barra (con .bak)
-//!   5. recarga waybar, solo si alguno de los archivos anteriores cambió
+//!   5. `~/.config/systemd/user/koala-medir.{service,timer}` — una medición al iniciar sesión
+//!   6. recarga waybar, solo si alguno de sus archivos cambió
 //!
 //! Se puede ejecutar en cada inicio de sesión: si no hay nada que cambiar, no escribe nada
 //! ni recarga nada.
@@ -38,6 +39,36 @@ fn generar_modulo(bin: &str) -> String {
 }}"#
     )
 }
+
+const SERVICIO: &str = "koala-medir.service";
+const TIMER: &str = "koala-medir.timer";
+
+fn generar_servicio(bin: &str) -> String {
+    format!(
+        "[Unit]
+Description=KOALA: registra una medición en el historial
+
+[Service]
+Type=oneshot
+ExecStart={bin} medir
+TimeoutStartSec=60
+"
+    )
+}
+
+/// Una sola medición por login; después se mide solo a pedido del usuario.
+/// Espera 60 s para no registrar un SIN RED falso: el systemd del usuario no puede
+/// esperar a la red con una dependencia.
+const UNIDAD_TIMER: &str = "[Unit]
+Description=KOALA: medición al iniciar sesión
+
+[Timer]
+OnStartupSec=60s
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+";
 
 /// Clases css: colores por letra (sin emojis, pedido del usuario) + atenuado para datos viejos.
 const CSS: &str = r#"
@@ -201,6 +232,51 @@ fn colocar_regla_hyprland() -> Result<String, String> {
     Ok(String::from("regla agregada (ventana flotante kOala)"))
 }
 
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    let salida = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .map_err(|e| format!("no se pudo ejecutar systemctl: {e}"))?;
+    if salida.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&salida.stderr).trim().to_owned())
+    }
+}
+
+/// Retira el `koala.service` de versiones anteriores: solo imprimía el JSON del widget
+/// y se reiniciaba cada 30 s.
+fn retirar_servicio_viejo(dir: &PathBuf) {
+    let ruta = dir.join("koala.service");
+    if fs::read_to_string(&ruta).is_ok_and(|c| c.contains(" barra")) {
+        let _ = systemctl(&["disable", "--now", "koala.service"]);
+        let _ = fs::remove_file(&ruta);
+    }
+}
+
+/// Instala el timer de la medición de inicio. Si las unidades no cambiaron no toca nada,
+/// así un timer que el usuario deshabilitó no se vuelve a habilitar en el próximo inicio.
+/// No lo arranca: con `--now` mediría en el momento, y la medición es recién en el próximo login.
+fn colocar_temporizador(bin: &str) -> Result<&'static str, String> {
+    let dir = casa().join(".config").join("systemd").join("user");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    retirar_servicio_viejo(&dir);
+
+    let cambio_servicio = escribir_si_cambia(&dir.join(SERVICIO), &generar_servicio(bin))?;
+    let cambio_timer = escribir_si_cambia(&dir.join(TIMER), UNIDAD_TIMER)?;
+    if !cambio_servicio && !cambio_timer {
+        return Ok("ya presente");
+    }
+    let activado = systemctl(&["daemon-reload"]).and_then(|_| systemctl(&["enable", TIMER]));
+    if let Err(e) = activado {
+        // sin el archivo, la próxima ejecución vuelve a intentarlo
+        let _ = fs::remove_file(dir.join(TIMER));
+        return Err(e);
+    }
+    Ok("activada (una vez, 60 s después de cada login)")
+}
+
 pub fn instalar() {
     println!("== KOALA instalar ==");
 
@@ -214,7 +290,7 @@ pub fn instalar() {
     println!("binario: {bin}");
 
     let _ = actualizar_ips().map_err(|e| eprintln!("ips: {e}"));
-    println!("1/4 ips.json → ~/.config/koala/ips.json (si no existía)");
+    println!("1/5 ips.json → ~/.config/koala/ips.json (si no existía)");
 
     let dir = casa().join(".config").join("waybar");
     let _ = fs::create_dir_all(dir.join("modules"));
@@ -225,7 +301,7 @@ pub fn instalar() {
     match escribir_si_cambia(&dir.join("modules").join("koala.jsonc"), &generar_modulo(&bin)) {
         Ok(cambio) => {
             hay_cambios |= cambio;
-            println!("2/4 módulo → ~/.config/waybar/modules/koala.jsonc");
+            println!("2/5 módulo → ~/.config/waybar/modules/koala.jsonc");
         }
         Err(e) => eprintln!("módulo: {e}"),
     }
@@ -233,7 +309,7 @@ pub fn instalar() {
     match escribir_con_marcadores(&dir.join("user-style.css"), MARCA_INI, MARCA_FIN, CSS) {
         Ok(cambio) => {
             hay_cambios |= cambio;
-            println!("3/4 colores → ~/.config/waybar/user-style.css");
+            println!("3/5 colores → ~/.config/waybar/user-style.css");
         }
         Err(e) => eprintln!("estilos: {e}"),
     }
@@ -241,10 +317,15 @@ pub fn instalar() {
     match colocar_en_config(&dir.join("config.jsonc")) {
         Ok(true) => {
             hay_cambios = true;
-            println!("4/4 posición en config.jsonc: agregado junto a caffeine (backup .koala-bak)");
+            println!("4/5 posición en config.jsonc: agregado junto a caffeine (backup .koala-bak)");
         }
-        Ok(false) => println!("4/4 posición en config.jsonc: ya presente"),
+        Ok(false) => println!("4/5 posición en config.jsonc: ya presente"),
         Err(e) => eprintln!("colocación: {e}"),
+    }
+
+    match colocar_temporizador(&bin) {
+        Ok(detalle) => println!("5/5 medición al iniciar sesión: {detalle}"),
+        Err(e) => eprintln!("medición al iniciar sesión: {e}"),
     }
 
     match colocar_regla_hyprland() {
@@ -306,6 +387,16 @@ mod tests {
     #[test]
     fn agrega_el_bloque_en_un_archivo_sin_salto_final() {
         assert_eq!(aplicar("a"), format!("a\n\n{INI}\nbloque\n{FIN}\n"));
+    }
+
+    /// El usuario pidió explícitamente que no haya mediciones automáticas periódicas.
+    #[test]
+    fn el_timer_mide_una_sola_vez_por_login() {
+        assert!(UNIDAD_TIMER.contains("OnStartupSec=60s"));
+        assert!(UNIDAD_TIMER.contains("WantedBy=timers.target"));
+        for repeticion in ["OnUnitActiveSec", "OnUnitInactiveSec", "OnCalendar"] {
+            assert!(!UNIDAD_TIMER.contains(repeticion));
+        }
     }
 
     #[test]
