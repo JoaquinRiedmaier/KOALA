@@ -1,6 +1,6 @@
 # KOALA — Historial de Mediciones de Ping
 
-Plan de implementación. La Fase 1 está implementada; las fases 2 y 3 son opcionales.
+Plan de implementación. Las fases 1 y 2 están implementadas; la fase 3 es opcional.
 
 ## 1) Objetivo
 
@@ -15,7 +15,7 @@ Hay un único archivo, que se crea en la primera medición y se conserva entre r
 | 1 | Al iniciar se registra un valor | Timer systemd de usuario `koala-medir.timer`, una vez, 60 s después de iniciar sesión |
 | 2 | Los valores se guardan en un archivo de historial | JSONL en `~/.local/state/koala/history.jsonl`; cada medición agrega una línea |
 | 3 | Mediciones siguientes | Solo manuales: clic en el widget, abrir la GUI o "Re-medir" |
-| 4 | La GUI muestra el historial | Vista nueva **HISTORIAL** en `koala gui` (tabla con scroll) |
+| 4 | La GUI muestra el historial | Vista nueva **HISTORIAL** en `koala gui`: gráfico por hora del día elegido y tabla con scroll |
 | 5 | Filtrar por empresa | ComboBox con la unión de nombres presentes en el historial (`TODAS` por defecto) |
 
 ## 3) Antecedentes del código
@@ -146,9 +146,24 @@ Decisiones:
 - Con una empresa: `HORA · PING · JITTER · PÉRDIDA · ESTADO`. Si esa medición no incluía a la empresa, la fila muestra `—`.
 - Las filas más recientes van primero.
 - Se carga el historial completo al abrir la vista. La tabla usa `ScrollArea::show_rows`, que solo dibuja las filas visibles, así que no hace falta limitar la cantidad.
+- **Un día por vez:** el gráfico y la tabla muestran el mismo día. Arranca en el más nuevo y los botones `<` y `>` saltan a los días con mediciones.
 - Botón **ACTUALIZAR** para releer el archivo. También se relee después de una medición hecha desde la GUI.
 - Hora local con `chrono`: `14:32`, o `05/11 14:32` si no es de hoy.
 - Misma paleta existente (`COL_OK / COL_WARN / COL_BAD / COL_OFF`).
+
+### Gráfico por hora
+
+Área escalonada dibujada con `egui::Painter`, sin dependencias nuevas.
+
+- **Eje horizontal:** las 24 horas del día, de 00 a 24.
+- **Eje vertical:** latencia en ms, con líneas en los cambios de color. El tope nunca baja de 100 ms, para que un valor chico se vea chico, y sube a 200, 500, 1000… si hace falta.
+- **Valor de cada hora:** promedio de sus mediciones con respuesta. Sigue el filtro de empresa.
+- **Color por altura:** verde hasta 50 ms (`LIMITE_MS`, el mismo del veredicto), amarillo hasta 100 ms (`LIMITE_MS_ALTO`) y rojo por encima. Hay leyenda, y el color nunca es la única pista: la altura y el detalle dicen lo mismo.
+- **Hora sin mediciones:** queda vacía. No se une con las vecinas, porque mostraría datos que nadie midió.
+- **Cortes:** una hora toda sin respuesta ocupa la columna en rojo tenue, para no confundirse con una hora vacía. Si solo algunas mediciones fallaron, lleva una franja roja al pie.
+- **Mouse:** al pasar por una hora muestra el rango, la media, el peor valor y la cantidad de mediciones.
+
+Como las mediciones son manuales salvo la del login, el gráfico solo tiene columnas en las horas en que se midió.
 
 ## 8) Casos borde
 
@@ -163,7 +178,7 @@ Decisiones:
 ## 9) Fases de implementación
 
 1. **Fase 1:** `histo.rs`, configuración, append en `medir`, systemd y vista de tabla con filtro.
-2. **Fase 2 (opcional):** gráfico de `media_ms`, dibujado con `egui::Painter` para evitar una dependencia nueva.
+2. **Fase 2:** gráfico por hora y navegación por días (§7).
 3. **Fase 3 (opcional):** exportar a CSV lo filtrado.
 
 ## 10) Criterios de aceptación
@@ -171,7 +186,7 @@ Decisiones:
 1. `cargo test` pasa, con los tests nuevos de `histo.rs`.
 2. Tras `koala instalar`, `koala-medir.timer` queda habilitado y no se mide nada en ese momento.
 3. Un minuto después de iniciar sesión hay un registro nuevo con esa hora, y no aparecen más sin pedirlos.
-4. En la GUI, elegir `FACEBOOK` muestra la serie de esa empresa, y `TODAS` muestra la global.
+4. En la GUI, elegir `FACEBOOK` muestra la serie de esa empresa, en el gráfico y en la tabla, y `TODAS` muestra la global.
 5. El archivo persiste entre reinicios.
 6. Repetir `koala instalar` no modifica ningún archivo ni recarga nada.
 

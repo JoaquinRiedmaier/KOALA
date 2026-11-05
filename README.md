@@ -14,45 +14,81 @@ KOALA es una aplicación de terminal que analiza la conectividad de internet eje
 - **Integración con HyDE** (Hyprland Desktop Environment)
 - **Configuración idempotente** - se puede ejecutar `koala instalar` múltiples veces sin crear duplicados
 
-## Installation
+## Instalación
 
-### 1. Instalación con Cargo (Recommeded)
+### Requisitos
 
-```bash
-# Clone el repositorio (si aún no lo tienes)
-git clone https://github.com/tuusuario/koala.git
-cd koala
+- Linux con systemd
+- [Rust y Cargo](https://rustup.rs) 1.85 o superior
+- `git`
+- `ping` (paquete `iputils`)
+- Waybar con HyDE, para el widget. Sin HyDE, `koala medir` y `koala gui` funcionan igual
 
-# Instalar usando cargo (con cargo instalado)
-cargo install --path .
+### Pasos
 
-# Esto creará el binario en ~/.cargo/bin/koala
-# El comando 'koala' estará disponible en tu PATH
+1. **Clonar el repositorio:**
+
+   ```bash
+   git clone https://github.com/JoaquinRiedmaier/KOALA.git
+   ```
+
+   ```bash
+   cd KOALA
+   ```
+
+2. **Instalar el programa.** Crea el binario en `~/.cargo/bin/koala`:
+
+   ```bash
+   cargo install --path .
+   ```
+
+   Si después la terminal no encuentra `koala`, agregá `~/.cargo/bin` a tu `PATH`.
+
+3. **Integrarlo con tu escritorio:**
+
+   ```bash
+   koala instalar
+   ```
+
+   Este comando se puede repetir sin riesgo: si no hay nada que cambiar, no toca ningún archivo. La primera vez:
+   - Copia la lista de servidores a `~/.config/koala/ips.json`.
+   - Agrega el widget a waybar, junto a `custom/caffeine`, con sus colores.
+   - Agrega la regla de ventana flotante en `~/.config/hypr/hyprland.lua`.
+   - Activa la medición al iniciar sesión.
+   - Recarga waybar.
+
+4. **Comprobar que funciona:**
+
+   ```bash
+   koala medir && koala barra
+   ```
+
+   Tiene que mostrar el resultado y una línea JSON. El widget aparece en waybar: con clic izquierdo mide y con clic derecho abre la ventana.
+
+### Conservar el widget en HyDE
+
+HyDE regenera `~/.config/waybar/config.jsonc`, y al hacerlo el widget desaparece. Para que vuelva solo, agregá esto al final de `~/.config/hypr/hyprland.lua`:
+
+```lua
+hl.on("hyprland.start", function()
+    hl.exec_cmd("sh -c 'sleep 8; $HOME/.cargo/bin/koala instalar'")
+end)
 ```
 
-### 2. Script de Instalación Automático
+### Instalación con el script
 
-Para una instalación completa con configuración automática:
+`scripts/install.sh` hace los pasos 2 a 4 de una vez, y comprueba antes que Cargo esté instalado. Se ejecuta desde la carpeta del proyecto:
 
 ```bash
-# Hacer el script ejecutable
-chmod +x scripts/install.sh
-
-# Ejecutar la instalación
 ./scripts/install.sh
 ```
 
-Este script hará:
-- Instalar KOALA usando cargo
-- Integrar con waybar usando `koala instalar`
-- Reiniciar waybar si está corriendo
+### Ejecutar sin instalar
 
-### 3. Ejecución Directamente desde Fuente
+Para desarrollo, se indica el subcomando después de `--`:
 
 ```bash
-# Para desarrollo/testing
-cd koala
-cargo run
+cargo run -- gui
 ```
 
 ## Comandos
@@ -77,7 +113,8 @@ KOALA soporta los siguientes subcomandos:
 - Integra KOALA con waybar (HyDE)
 - Crea/actualiza archivos de configuración
 - Añade regla de ventana flotante para Hyprland
-- Reinicia waybar si está corriendo
+- Activa la medición al iniciar sesión
+- Recarga waybar si algo cambió
 
 ## Configuration
 
@@ -141,7 +178,11 @@ Añade `custom/koala` a la barra. KOALA se añade al lado izquierdo junto a otro
 
 `koala instalar` activa `koala-medir.timer`, un timer de systemd de usuario que hace **una sola medición** 60 segundos después de iniciar sesión. Después solo se mide a pedido: clic en el widget, abrir `koala gui` o "Re-medir". Todas esas mediciones quedan en el historial.
 
-Para verlo, abrí `koala gui` y elegí **HISTORIAL**. Se puede filtrar por empresa.
+Para verlo, abrí `koala gui` y elegí **HISTORIAL**. Muestra un día por vez, y se puede filtrar por empresa y moverse entre días con `<` y `>`:
+
+- **Gráfico:** las horas van en el eje horizontal y la latencia en el vertical. Cada hora muestra el promedio de sus mediciones, en verde hasta 50 ms, amarillo hasta 100 ms y rojo por encima. Una hora sin mediciones queda vacía. Al pasar el mouse se ve el detalle.
+- **Cortes:** una hora sin ninguna respuesta se marca en rojo tenue en toda la columna, y una hora con algún fallo lleva una franja roja al pie.
+- **Tabla:** debajo, las mediciones de ese día.
 
 - **Archivo:** `~/.local/state/koala/history.jsonl`, una medición JSON por línea. Se crea en la primera medición, se conserva entre reinicios y se cambia con `$KOALA_HISTORIAL`.
 - **Retención:** al superar 8 MiB (unas 10.000 mediciones) se descartan las más viejas.
@@ -292,30 +333,20 @@ koala medir
    koala gui
    ```
 
-### Configuración Inicial
-
-1. Ejecutar la instalación una vez:
-   ```bash
-   koala instalar
-   ```
-
-2. Reiniciar waybar:
-   ```bash
-   killall waybar && waybar
-   ```
-
-3. Verificar el widget y hacer clic derecho para abrir la GUI si es necesario
-
 ## Actualización
 
-Para actualizar KOALA:
+Desde la carpeta del proyecto:
 
 ```bash
-cd /home/johnd/Música/SOFTWARE/KOALA
-cargo install --path . --force
+git pull
+```
 
-# Si usaste el script de instalación, solo ejecútalo nuevamente
-./scripts/install.sh
+```bash
+cargo install --path . --force
+```
+
+```bash
+koala instalar
 ```
 
 ## Apoyo

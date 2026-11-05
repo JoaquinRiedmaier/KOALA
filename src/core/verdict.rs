@@ -8,6 +8,8 @@ use crate::core::ipfile::Objetivo;
 use crate::core::ping::{medir_lote, Metricas, ResultadoPing};
 
 pub const LIMITE_MS: f32 = 50.0;
+/// Latencia desde la que el gráfico del historial pasa de amarillo a rojo.
+pub const LIMITE_MS_ALTO: f32 = 100.0;
 pub const LIMITE_JITTER: f32 = 10.0;
 pub const LIMITE_PERDIDA: u8 = 25;
 /// Si 2 o más proveedores están 100 % caídos => estado "bad".

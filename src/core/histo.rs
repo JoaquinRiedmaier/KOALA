@@ -104,6 +104,53 @@ pub fn nombres_empresas(registros: &[RegistroHistorial]) -> Vec<String> {
     nombres
 }
 
+/// Mediciones de una hora del día. Con `mediciones == 0` la hora no tiene datos.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ResumenHora {
+    pub mediciones: u32,
+    pub sin_respuesta: u32,
+    /// Promedio de las mediciones con respuesta.
+    pub media: Option<f32>,
+    pub peor: Option<f32>,
+}
+
+/// Agrupa mediciones por hora, de la empresa indicada o global (`None`).
+/// `hora_de` convierte un `ts` en la hora 0–23 del día que se está mirando.
+pub fn resumen_por_hora<'a>(
+    registros: impl IntoIterator<Item = &'a RegistroHistorial>,
+    empresa: Option<&str>,
+    hora_de: impl Fn(u64) -> usize,
+) -> [ResumenHora; 24] {
+    let mut horas = [ResumenHora::default(); 24];
+    let mut sumas = [0.0f32; 24];
+    for r in registros {
+        let latencia = match empresa {
+            None => r.media_ms,
+            Some(nombre) => match r.empresa(nombre) {
+                Some(e) => e.media,
+                None => continue, // esa medición no incluía a la empresa
+            },
+        };
+        let indice = hora_de(r.ts).min(23);
+        let hora = &mut horas[indice];
+        hora.mediciones += 1;
+        match latencia {
+            Some(ms) => {
+                sumas[indice] += ms;
+                hora.peor = Some(hora.peor.map_or(ms, |p| p.max(ms)));
+            }
+            None => hora.sin_respuesta += 1,
+        }
+    }
+    for (hora, suma) in horas.iter_mut().zip(sumas) {
+        let con_respuesta = hora.mediciones - hora.sin_respuesta;
+        if con_respuesta > 0 {
+            hora.media = Some(suma / con_respuesta as f32);
+        }
+    }
+    horas
+}
+
 fn agregar_en(ruta: &Path, registro: &RegistroHistorial, limite: u64) -> io::Result<()> {
     if let Some(dir) = ruta.parent() {
         fs::create_dir_all(dir)?;
@@ -310,6 +357,56 @@ mod tests {
         assert_eq!(leido.estado, Estado::Offline);
         assert_eq!(leido.media_ms, None);
         assert_eq!(leido.empresas[0].etiqueta(), "SIN RESPUESTA");
+    }
+
+    /// El `ts` de estos registros es directamente la hora.
+    fn por_hora(registros: &[RegistroHistorial], empresa: Option<&str>) -> [ResumenHora; 24] {
+        resumen_por_hora(registros, empresa, |ts| ts as usize)
+    }
+
+    fn con_latencia(hora: u64, ms: Option<f32>) -> RegistroHistorial {
+        let mut r = registro(hora);
+        r.media_ms = ms;
+        r.empresas[0].media = ms;
+        r
+    }
+
+    #[test]
+    fn promedia_las_mediciones_de_cada_hora() {
+        let horas = por_hora(&[con_latencia(19, Some(30.0)), con_latencia(19, Some(50.0))], None);
+        assert_eq!(horas[19].mediciones, 2);
+        assert_eq!(horas[19].media, Some(40.0));
+        assert_eq!(horas[19].peor, Some(50.0));
+    }
+
+    #[test]
+    fn una_hora_sin_mediciones_queda_vacia() {
+        let horas = por_hora(&[con_latencia(19, Some(30.0))], None);
+        assert_eq!(horas[18], ResumenHora::default());
+    }
+
+    #[test]
+    fn un_corte_cuenta_como_medicion_pero_no_baja_el_promedio() {
+        let horas = por_hora(&[con_latencia(8, Some(30.0)), con_latencia(8, None)], None);
+        assert_eq!(horas[8].mediciones, 2);
+        assert_eq!(horas[8].sin_respuesta, 1);
+        assert_eq!(horas[8].media, Some(30.0));
+    }
+
+    #[test]
+    fn una_hora_toda_sin_respuesta_no_tiene_latencia() {
+        let horas = por_hora(&[con_latencia(8, None)], None);
+        assert_eq!((horas[8].mediciones, horas[8].sin_respuesta), (1, 1));
+        assert_eq!(horas[8].media, None);
+    }
+
+    #[test]
+    fn el_resumen_por_empresa_usa_sus_datos_y_salta_las_mediciones_sin_ella() {
+        let mut r = con_latencia(10, Some(99.0));
+        r.empresas[0].media = Some(20.0);
+        let horas = por_hora(&[r.clone()], Some("GOOGLE"));
+        assert_eq!(horas[10].media, Some(20.0));
+        assert_eq!(por_hora(&[r], Some("FACEBOOK"))[10], ResumenHora::default());
     }
 
     #[test]

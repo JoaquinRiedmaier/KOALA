@@ -2,15 +2,17 @@
 //!
 //! Mide automáticamente al abrirse, muestra el veredicto con colores por letra
 //! (igual que el widget: sin emojis ni leds) y permite re-medir con un botón.
-//! La vista HISTORIAL muestra las mediciones guardadas, con filtro por empresa.
+//! La vista HISTORIAL muestra las mediciones guardadas de un día: un gráfico por hora
+//! y su tabla, con filtro por empresa.
 
-use chrono::{DateTime, Local, NaiveDate};
-use eframe::egui::{self, Color32, RichText};
+use chrono::{DateTime, Local, NaiveDate, Timelike};
+use eframe::egui::{self, pos2, vec2, Color32, Rect, RichText, Stroke};
+use std::ops::Range;
 use std::sync::mpsc;
 
 use crate::core::cache;
-use crate::core::histo::{self, RegistroHistorial};
-use crate::core::verdict::{Estado, EstadoGlobal};
+use crate::core::histo::{self, RegistroHistorial, ResumenHora};
+use crate::core::verdict::{Estado, EstadoGlobal, LIMITE_MS, LIMITE_MS_ALTO};
 
 const COL_TEXTO: Color32 = Color32::from_rgb(0xcd, 0xd6, 0xf4);
 const COL_SAP: Color32 = Color32::from_rgb(0x11, 0x11, 0x1b); // fondo tipo Catppuccin Mocha
@@ -22,6 +24,11 @@ const COL_OFF: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
 
 const TODAS: &str = "TODAS";
 const ALTO_FILA: f32 = 20.0;
+const ALTO_GRAFICO: f32 = 180.0;
+const MARGEN_EJE_Y: f32 = 48.0;
+const MARGEN_EJE_X: f32 = 18.0;
+/// Opacidad del área: deja ver la grilla y hace resaltar el borde superior.
+const OPACIDAD_AREA: f32 = 0.8;
 const COLUMNAS_TODAS: [(&str, f32); 4] = [
     ("HORA", 90.0),
     ("ESTADO", 110.0),
@@ -40,7 +47,7 @@ pub fn ejecutar() {
     let opciones = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("kOala — medidor de internet")
-            .with_inner_size([480.0, 520.0])
+            .with_inner_size([480.0, 640.0])
             .with_resizable(true),
         ..Default::default()
     };
@@ -62,9 +69,175 @@ pub struct KoalaApp {
     vista: Vista,
     /// Mediciones guardadas, la más nueva primero. `None` = hay que leer el archivo.
     historial: Option<Vec<RegistroHistorial>>,
+    /// Días con mediciones, el más nuevo primero.
+    dias: Vec<DiaHistorial>,
+    /// Índice en `dias` del día que se está mirando.
+    dia: usize,
     empresas: Vec<String>,
     /// Empresa elegida en el filtro. `None` = todas.
     filtro: Option<String>,
+}
+
+/// Mediciones de un día: `filas` es su rango dentro del historial.
+struct DiaHistorial {
+    fecha: NaiveDate,
+    filas: Range<usize>,
+}
+
+fn momento_local(ts: u64) -> DateTime<Local> {
+    DateTime::from_timestamp(ts as i64, 0)
+        .unwrap_or_default()
+        .with_timezone(&Local)
+}
+
+/// Agrupa por día local. `registros` tiene que venir de más nuevo a más viejo.
+fn agrupar_por_dia(registros: &[RegistroHistorial]) -> Vec<DiaHistorial> {
+    let mut dias: Vec<DiaHistorial> = Vec::new();
+    for (i, r) in registros.iter().enumerate() {
+        let fecha = momento_local(r.ts).date_naive();
+        match dias.last_mut() {
+            Some(dia) if dia.fecha == fecha => dia.filas.end = i + 1,
+            _ => dias.push(DiaHistorial { fecha, filas: i..i + 1 }),
+        }
+    }
+    dias
+}
+
+/// Verde hasta el límite del veredicto, amarillo hasta el doble y rojo por encima.
+fn color_latencia(ms: f32) -> Color32 {
+    if ms <= LIMITE_MS {
+        COL_OK
+    } else if ms <= LIMITE_MS_ALTO {
+        COL_WARN
+    } else {
+        COL_OFF
+    }
+}
+
+/// Tope del eje vertical. Nunca baja de 100 ms: así un valor chico se ve chico.
+fn tope_eje(horas: &[ResumenHora; 24]) -> f32 {
+    let mayor = horas.iter().filter_map(|h| h.media).fold(0.0, f32::max);
+    [100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0]
+        .into_iter()
+        .find(|tope| mayor <= *tope)
+        .unwrap_or(mayor)
+}
+
+fn hora_en_x(x: f32, inicio: f32, ancho: f32) -> usize {
+    (((x - inicio) / ancho * 24.0).floor().max(0.0) as usize).min(23)
+}
+
+fn texto_hora(hora: usize, r: &ResumenHora) -> String {
+    let rango = format!("{hora:02}:00 a {:02}:00", hora + 1);
+    if r.mediciones == 0 {
+        return format!("{rango}\nSin mediciones");
+    }
+    let cantidad = match r.mediciones {
+        1 => "1 medición".to_owned(),
+        n => format!("{n} mediciones"),
+    };
+    let latencia = match (r.media, r.peor) {
+        (Some(media), Some(peor)) => format!("media {media:.1} ms · peor {peor:.1} ms"),
+        _ => "Sin respuesta".to_owned(),
+    };
+    match (r.media, r.sin_respuesta) {
+        (Some(_), n) if n > 0 => format!("{rango}\n{latencia}\n{cantidad} · {n} sin respuesta"),
+        _ => format!("{rango}\n{latencia}\n{cantidad}"),
+    }
+}
+
+fn texto_eje(pintor: &egui::Painter, posicion: egui::Pos2, alineacion: egui::Align2, texto: &str) {
+    pintor.text(posicion, alineacion, texto, egui::FontId::proportional(11.0), COL_IDLE);
+}
+
+/// Área escalonada por hora. Una hora sin mediciones queda vacía: unir las vecinas
+/// mostraría datos que nadie midió.
+fn pintar_grafico(ui: &mut egui::Ui, horas: &[ResumenHora; 24]) {
+    let tamano = vec2(ui.available_width(), ALTO_GRAFICO);
+    let (rect, respuesta) = ui.allocate_exact_size(tamano, egui::Sense::hover());
+    let pintor = ui.painter_at(rect);
+    let plot = Rect::from_min_max(
+        pos2(rect.left() + MARGEN_EJE_Y, rect.top() + 8.0),
+        pos2(rect.right() - 6.0, rect.bottom() - MARGEN_EJE_X),
+    );
+    let tope = tope_eje(horas);
+    let y_de = |ms: f32| plot.bottom() - ms.min(tope) / tope * plot.height();
+    let ancho_hora = plot.width() / 24.0;
+    let x_de = |hora: usize| plot.left() + hora as f32 * ancho_hora;
+    let columna = |hora: usize| {
+        Rect::from_x_y_ranges(x_de(hora)..=x_de(hora + 1), plot.y_range())
+    };
+
+    // ── Ejes: los valores marcan los cambios de color ──
+    let mut ultimo_y = f32::INFINITY;
+    for ms in [LIMITE_MS, LIMITE_MS_ALTO, tope] {
+        let y = y_de(ms);
+        if ultimo_y - y < 14.0 {
+            continue; // con un tope alto, 50 y 100 se pisarían
+        }
+        ultimo_y = y;
+        pintor.hline(plot.x_range(), y, Stroke::new(1.0_f32, COL_IDLE.gamma_multiply(0.25)));
+        texto_eje(&pintor, pos2(plot.left() - 6.0, y), egui::Align2::RIGHT_CENTER, &format!("{ms:.0} ms"));
+    }
+    pintor.hline(plot.x_range(), plot.bottom(), Stroke::new(1.0_f32, COL_IDLE.gamma_multiply(0.6)));
+    texto_eje(&pintor, pos2(plot.left() - 6.0, plot.bottom()), egui::Align2::RIGHT_CENTER, "0");
+    for hora in (0..24).step_by(3) {
+        let posicion = pos2(x_de(hora), plot.bottom() + 3.0);
+        texto_eje(&pintor, posicion, egui::Align2::CENTER_TOP, &format!("{hora:02}"));
+    }
+
+    // ── Área ──
+    for (hora, r) in horas.iter().enumerate() {
+        let col = columna(hora);
+        if let Some(ms) = r.media {
+            let color = color_latencia(ms);
+            let cima = y_de(ms).min(plot.bottom() - 2.0);
+            let area = Rect::from_x_y_ranges(col.x_range(), cima..=plot.bottom());
+            pintor.rect_filled(area, 0.0, color.gamma_multiply(OPACIDAD_AREA));
+            pintor.hline(col.x_range(), cima, Stroke::new(2.0_f32, color));
+        } else if r.mediciones > 0 {
+            // un corte de toda la hora ocupa la columna: no tiene que parecer una hora vacía
+            pintor.rect_filled(col, 0.0, COL_OFF.gamma_multiply(0.25));
+        }
+        if r.sin_respuesta > 0 {
+            let marca = Rect::from_x_y_ranges(col.x_range(), plot.bottom() - 3.0..=plot.bottom());
+            pintor.rect_filled(marca, 0.0, COL_OFF);
+        }
+    }
+
+    // ── Detalle al pasar el mouse ──
+    if let Some(posicion) = respuesta.hover_pos() {
+        if plot.x_range().contains(posicion.x) {
+            let hora = hora_en_x(posicion.x, plot.left(), plot.width());
+            pintor.rect_filled(columna(hora), 0.0, Color32::from_white_alpha(12));
+            respuesta.on_hover_text_at_pointer(texto_hora(hora, &horas[hora]));
+        }
+    }
+}
+
+fn pintar_leyenda(ui: &mut egui::Ui) {
+    let hasta = format!("hasta {LIMITE_MS:.0} ms");
+    let medio = format!("{LIMITE_MS:.0} a {LIMITE_MS_ALTO:.0} ms");
+    let alto = format!("más de {LIMITE_MS_ALTO:.0} ms");
+    ui.horizontal(|ui| {
+        for (color, texto) in [
+            (COL_OK, hasta.as_str()),
+            (COL_WARN, medio.as_str()),
+            (COL_OFF, alto.as_str()),
+            (COL_OFF, "sin respuesta"),
+        ] {
+            let (muestra, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
+            if texto == "sin respuesta" {
+                // igual que en el gráfico: una franja al pie de la hora
+                let franja = Rect::from_x_y_ranges(muestra.x_range(), muestra.bottom() - 3.0..=muestra.bottom());
+                ui.painter().rect_filled(franja, 0.0, color);
+            } else {
+                ui.painter().rect_filled(muestra, 2.0, color.gamma_multiply(OPACIDAD_AREA));
+            }
+            ui.label(RichText::new(texto).size(11.0).color(COL_IDLE));
+            ui.add_space(4.0);
+        }
+    });
 }
 
 fn color_de_etiqueta(etiqueta: &str) -> Color32 {
@@ -85,13 +258,10 @@ fn color_global(e: &Estado) -> Color32 {
     }
 }
 
-/// `14:32` si la medición es de hoy; si no, `05/11 14:32`.
-fn hora_local(ts: u64, hoy: NaiveDate) -> String {
-    let Some(momento) = DateTime::from_timestamp(ts as i64, 0) else {
-        return "—".into();
-    };
-    let momento = momento.with_timezone(&Local);
-    let formato = if momento.date_naive() == hoy { "%H:%M" } else { "%d/%m %H:%M" };
+/// `14:32` si la medición es del día indicado; si no, `05/11 14:32`.
+fn hora_local(ts: u64, dia: NaiveDate) -> String {
+    let momento = momento_local(ts);
+    let formato = if momento.date_naive() == dia { "%H:%M" } else { "%d/%m %H:%M" };
     momento.format(formato).to_string()
 }
 
@@ -158,6 +328,8 @@ impl KoalaApp {
             midiendo: false,
             vista: Vista::Veredicto,
             historial: None,
+            dias: Vec::new(),
+            dia: 0,
             empresas: Vec::new(),
             filtro: None,
         }
@@ -187,8 +359,15 @@ impl KoalaApp {
     }
 
     fn recargar_historial(&mut self) {
-        let mut registros = histo::cargar();
-        registros.reverse();
+        self.asignar_registros(histo::cargar());
+    }
+
+    /// Ordena las mediciones y conserva el día que se estaba mirando, si sigue existiendo.
+    fn asignar_registros(&mut self, mut registros: Vec<RegistroHistorial>) {
+        registros.sort_by_key(|r| std::cmp::Reverse(r.ts));
+        let fecha = self.dias.get(self.dia).map(|d| d.fecha);
+        self.dias = agrupar_por_dia(&registros);
+        self.dia = self.dias.iter().position(|d| Some(d.fecha) == fecha).unwrap_or(0);
         self.empresas = histo::nombres_empresas(&registros);
         self.historial = Some(registros);
     }
@@ -300,16 +479,43 @@ impl KoalaApp {
         }
 
         ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(4.0);
 
-        let Some(registros) = &self.historial else {
-            return;
-        };
-        if registros.is_empty() {
+        let Some(fecha) = self.dias.get(self.dia).map(|d| d.fecha) else {
+            ui.separator();
+            ui.add_space(4.0);
             ui.label(RichText::new("Todavía no hay mediciones guardadas.").color(COL_IDLE));
             return;
-        }
+        };
+
+        // ── Día: se salta a los días con mediciones ──
+        ui.horizontal(|ui| {
+            let hay_anterior = self.dia + 1 < self.dias.len();
+            if ui.add_enabled(hay_anterior, egui::Button::new("<")).on_hover_text("Día anterior").clicked() {
+                self.dia += 1;
+            }
+            if ui.add_enabled(self.dia > 0, egui::Button::new(">")).on_hover_text("Día siguiente").clicked() {
+                self.dia -= 1;
+            }
+            let es_hoy = fecha == Local::now().date_naive();
+            let titulo = format!("{}{}", if es_hoy { "Hoy · " } else { "" }, fecha.format("%d/%m/%Y"));
+            ui.label(RichText::new(titulo).color(COL_TEXTO));
+        });
+        ui.add_space(4.0);
+
+        let (Some(registros), Some(dia)) = (&self.historial, self.dias.get(self.dia)) else {
+            return;
+        };
+        let del_dia = &registros[dia.filas.clone()];
+
+        let horas = histo::resumen_por_hora(del_dia, self.filtro.as_deref(), |ts| {
+            momento_local(ts).hour() as usize
+        });
+        pintar_grafico(ui, &horas);
+        pintar_leyenda(ui);
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
 
         let columnas: &[(&str, f32)] = match self.filtro {
             Some(_) => &COLUMNAS_EMPRESA,
@@ -319,16 +525,15 @@ impl KoalaApp {
             (*ancho, RichText::new(*titulo).color(COL_IDLE).weak())
         }));
 
-        let hoy = Local::now().date_naive();
-        // show_rows dibuja solo las filas visibles: el historial completo no pesa
+        // show_rows dibuja solo las filas visibles
         egui::ScrollArea::vertical()
             .id_salt("tabla_historial")
             .auto_shrink([false, false])
-            .show_rows(ui, ALTO_FILA, registros.len(), |ui, visibles| {
-                for r in &registros[visibles] {
+            .show_rows(ui, ALTO_FILA, del_dia.len(), |ui, visibles| {
+                for r in &del_dia[visibles] {
                     let celdas = match &self.filtro {
-                        Some(nombre) => celdas_empresa(r, nombre, hoy),
-                        None => celdas_todas(r, hoy),
+                        Some(nombre) => celdas_empresa(r, nombre, dia.fecha),
+                        None => celdas_todas(r, dia.fecha),
                     };
                     fila(ui, columnas.iter().zip(celdas).map(|((_, ancho), (texto, color))| {
                         (*ancho, RichText::new(texto).color(color))
@@ -438,11 +643,87 @@ mod tests {
         assert_eq!(textos(celdas_todas(&r, hoy()))[1..], ["SIN RED", "—", "25%"]);
     }
 
+    #[test]
+    fn el_color_cambia_en_los_limites() {
+        assert_eq!(color_latencia(36.0), COL_OK);
+        assert_eq!(color_latencia(LIMITE_MS), COL_OK);
+        assert_eq!(color_latencia(50.1), COL_WARN);
+        assert_eq!(color_latencia(LIMITE_MS_ALTO), COL_WARN);
+        assert_eq!(color_latencia(100.1), COL_OFF);
+    }
+
+    fn con_media(ms: f32) -> [ResumenHora; 24] {
+        let mut horas = [ResumenHora::default(); 24];
+        horas[3].media = Some(ms);
+        horas
+    }
+
+    #[test]
+    fn el_eje_no_baja_de_100_ms_y_contiene_al_mayor_valor() {
+        assert_eq!(tope_eje(&[ResumenHora::default(); 24]), 100.0);
+        assert_eq!(tope_eje(&con_media(36.0)), 100.0);
+        assert_eq!(tope_eje(&con_media(100.5)), 200.0);
+        assert_eq!(tope_eje(&con_media(1500.0)), 2000.0);
+        assert_eq!(tope_eje(&con_media(9000.0)), 9000.0);
+    }
+
+    #[test]
+    fn cada_posicion_del_grafico_cae_en_su_hora() {
+        assert_eq!(hora_en_x(100.0, 100.0, 240.0), 0);
+        assert_eq!(hora_en_x(129.9, 100.0, 240.0), 2);
+        assert_eq!(hora_en_x(130.0, 100.0, 240.0), 3);
+        assert_eq!(hora_en_x(340.0, 100.0, 240.0), 23);
+        assert_eq!(hora_en_x(90.0, 100.0, 240.0), 0);
+    }
+
+    #[test]
+    fn el_detalle_de_una_hora_describe_lo_que_paso() {
+        let vacia = ResumenHora::default();
+        assert_eq!(texto_hora(7, &vacia), "07:00 a 08:00\nSin mediciones");
+
+        let corte = ResumenHora { mediciones: 1, sin_respuesta: 1, ..vacia };
+        assert_eq!(texto_hora(7, &corte), "07:00 a 08:00\nSin respuesta\n1 medición");
+
+        let mixta = ResumenHora { mediciones: 3, sin_respuesta: 1, media: Some(36.44), peor: Some(40.0) };
+        assert_eq!(
+            texto_hora(23, &mixta),
+            "23:00 a 24:00\nmedia 36.4 ms · peor 40.0 ms\n3 mediciones · 1 sin respuesta"
+        );
+    }
+
+    #[test]
+    fn agrupa_por_dia_de_mas_nuevo_a_mas_viejo() {
+        const DIA: u64 = 86_400;
+        let mediodia = Local::now().with_hour(12).unwrap().timestamp() as u64;
+        let registros = [registro(mediodia), registro(mediodia - 60), registro(mediodia - 3 * DIA)];
+        let dias = agrupar_por_dia(&registros);
+        assert_eq!(dias.len(), 2);
+        assert_eq!(dias[0].filas, 0..2);
+        assert_eq!(dias[1].filas, 2..3);
+    }
+
+    #[test]
+    fn recargar_conserva_el_dia_elegido() {
+        const DIA: u64 = 86_400;
+        let mediodia = Local::now().with_hour(12).unwrap().timestamp() as u64;
+        let viejo = registro(mediodia - 2 * DIA);
+        let mut app = KoalaApp::vacia();
+        app.asignar_registros(vec![viejo.clone(), registro(mediodia)]);
+        assert_eq!(app.dia, 0, "arranca en el día más nuevo");
+
+        app.dia = 1;
+        app.asignar_registros(vec![registro(mediodia + 60), viejo, registro(mediodia)]);
+        assert_eq!(app.dia, 1);
+    }
+
     /// Dibuja la vista sin abrir una ventana, con las variantes de filtro y sin datos.
     #[test]
     fn la_vista_historial_se_dibuja_en_todos_los_casos() {
         let ctx = egui::Context::default();
-        let registros: Vec<_> = (0..5_000).map(registro).collect();
+        let ahora = Local::now().timestamp() as u64;
+        let mut registros: Vec<_> = (0..5_000).map(|i| registro(ahora - i * 300)).collect();
+        registros[7].media_ms = None;
+        registros[7].empresas[0].media = None;
         for (historial, filtro) in [
             (registros.clone(), None),
             (registros.clone(), Some("GOOGLE")),
@@ -450,11 +731,11 @@ mod tests {
             (Vec::new(), None),
         ] {
             let mut app = KoalaApp {
-                empresas: histo::nombres_empresas(&historial),
-                historial: Some(historial),
                 filtro: filtro.map(String::from),
                 ..KoalaApp::vacia()
             };
+            app.asignar_registros(historial);
+            app.dia = app.dias.len().saturating_sub(1); // también un día que no es hoy
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| app.pintar_historial(ui));
             });
